@@ -1,0 +1,624 @@
+transcript_analysis = "Во вложенном файле транскрипт диалога с потенциальным клиентом в процессе B2B-продажи
+Ты должен проанализировать этот транскрипт, пользуясь чеклистом ниже
+Анализ проводи по всему транскрипту, не пропуская куски файла
+Результат нужно вернуть в структурированном формате, указанном в Structured Output JSON schema
+
+Meta-блок (служебный, но важный для UX)
+0. Meeting Type (определяется LLM автоматически)
+Цель: не менять структуру отчёта, а менять приоритеты и строгость заполнения.
+Что вывести:
+Основной тип встречи: Discovery / Demo-Workshop / Tech Debug / Commercial / Exec alignment
+Уверенность: high/med/low
+2–3 сигнала, почему выбран этот тип (например “обсуждали логи/ошибки”, “запрос прайса”, “много discovery-вопросов”).
+Правило использования:
+Структура отчёта одна и та же.
+Тип встречи влияет только на:
+порядок блоков (что сверху),
+какие секции считаются “критичными”,
+какие “missing” подсвечивать, а какие сворачивать.
+
+Паспорт сделки
+Цель: дать быстрый контекст “что это за сделка” без пересказа звонка.
+1. Клиент
+Что хранить
+Название компании (как прозвучало) + (опц.) группа компаний/холдинг (если явно)
+Контактные лица (1–3) и их роли (если прозвучали)
+(опц.) Сегмент/индустрия (если явно)
+Статусы
+present — название названо явно
+missing — компания не названа
+uncertain — звучит неоднозначно (“группа/головная”, несколько вариантов)
+Правило извлечения
+Если несколько названий — показываем кандидаты и отмечаем конфликт/неуверенность.
+
+2. Предмет продажи
+Чтобы не ломаться на витринных/многопродуктовых встречах, делим на две части:
+2.1 Primary theme (1 строка)
+“какую проблему/направление обсуждают” в языке клиента (например “поиск по внутренним документам”, “агент для обработки писем”, “консолидация финансовых данных”).
+2.2 Solution candidates (до 3)
+какие продукты/модули/услуги фигурируют как кандидаты решения (если явно).
+Статусы
+present — тема ясна
+uncertain — много тем без явного якоря
+missing — вообще не понятно, что продаём/обсуждаем (редко)
+
+3. Этап сделки
+Что хранить
+Этап воронки: Lead → Discovery → Demo/Workshop → Proposal → Negotiation → Procurement/Legal/Security → Closed Won/Lost
+Уверенность: explicit/inferred
+Правила
+Если этап назван явно → present, confidence high.
+Если inferred → uncertain + объяснение сигналов (“обсуждали прайс”, “договаривались о пилоте”, “обсуждали NDA”).
+
+4. Качество паспорта
+Источник: только транскрипт
+Уверенность по каждому полю
+Конфликты/кандидаты
+
+Коммерческий трэк
+Цель: что известно/неизвестно для движения сделки.
+1. Боли и последствия
+✅ если есть:
+Что не работает сейчас (симптом → проблема)
+Почему важно сейчас (триггер/что изменилось)
+Как измеряют проблему (метрика/сигнал — если была)
+Последствия бездействия (риски/потери — если было)
+Что уже пробовали (если было)
+⚠️ если:
+болит, но без конкретики (ставим uncertain и оформляем как “нужно уточнить”)
+
+2. Ценность и гипотеза результата
+(Чтобы не дублировать Product Track, тут не “use case”, а “почему это важно”.)
+✅ если есть:
+Какой результат хотят получить (1–2 фразы)
+Почему это важно (скорость/качество/риски/стоимость)
+Какие альтернативы рассматривают (сами/конкурент/ничего — если было)
+⚠️ если:
+ценность размыта или “в целом хотим лучше”
+
+3. ЛПРы и принятие решений
+✅ если есть:
+Финальный ЛПР (роль/должность — если был)
+Влияющие роли (тех/финансы/ИБ/пользователи)
+Owner внедрения (кто отвечает “после покупки”)
+Процесс принятия решения (шаги согласования)
+Что может заблокировать (ИБ/закупка/ИТ/финансы)
+Дополнение (обязательно попытаться выделить, даже если inferred):
+Champion / Owner / Blocker (кандидаты ролей)
+
+4. Сроки и триггеры
+✅ если есть:
+Дедлайн/событие
+Ориентир старта
+Цена переноса
+Внешние зависимости (ресурсы/спринты/подрядчики)
+“Самый маленький шаг” на этой неделе
+Дополнение (важно для управляемости):
+Cadence: когда следующий контакт/чекпоинт и что должно быть готово к нему (артефакт/решение)
+
+5. Деньги и закупка
+✅ если есть:
+Бюджет/диапазон/порядок величины
+Владелец бюджета
+Как покупают (договор/тендер/пилот)
+Критичные условия (оплата, документы, SLA)
+Что значит “дорого” (по сравнению с чем)
+Дополнение (часто критично, особенно для AI/инфры):
+Unit economics / измеритель стоимости: в чём считают цену (₽/пользователь/мес, ₽/1000 токенов, ₽/инфра-час, ₽/проект и т.д.)
+
+6. Движение и следующий шаг
+✅ если есть:
+Следующий шаг (что + дата/время или дедлайн)
+Цель следующего шага (что должно получиться)
+Кто должен участвовать со стороны клиента
+Домашки/артефакты (кто что пришлет)
+1–2 открытых вопроса до следующего шага
+
+7. Security / Compliance / Data Access (отдельная корзина)
+(Выделено отдельно, потому что в тех/корп сделках это часто главный блокер.)
+Собираем:
+PII/персональные данные, требования локализации, деперсонализация/redaction
+Запреты на облако/внешние модели/передачу данных
+Сеть/DMZ/доступы/аутентификация/аудит
+Политики ИБ для пилота (что нужно согласовать)
+✅ если:
+хотя бы часть ограничений/политик названа явно
+⚠️ если:
+безопасность может быть блокером, но в звонке не обсуждалась (ставим not_discussed, не драматизируем)
+
+Пилот
+Цель: не размазывать пилот по 6 корзинам. Это якорь, который делает отчёт “управляемым”.
+Собираем (5–7 пунктов):
+Цель пилота: что доказываем
+Скоуп: какой процесс/периметр/данные
+Входные артефакты от клиента
+Выходные артефакты от нас
+Критерии успеха (pass/fail)
+Сроки и чекпоинты
+Владельцы: client owner + vendor owner
+Статусы:
+present — если пилот явно обсуждали
+missing/not_discussed — если пока рано (и это нормально)
+
+Продуктовый трек
+Цель: что именно нужно, что ограничивает, как внедрять.
+1. Юзкейсы — где и кем будет использоваться
+Собираем:
+Кто пользователь (роль) и где в процессе это используется
+Сценарий: “когда X, пользователь делает Y, чтобы получить Z”
+Контекст эксплуатации (частота, среда, критичность)
+✅ если сценарий и роли ясны
+⚠️ если “вообще всем нужно” / нет конкретики
+
+2. Требования — что должно быть, чтобы работало
+Собираем типами:
+Functional
+Non-functional (скорость, надежность, безопасность, UX)
+Data / Integrations (данные/источники/выходы)
+✅ если есть must-have (хотя бы 1–3)
+⚠️ если только “хотелки” без приоритета
+
+3. Ограничения — что ограничивает (ресурсы, процессы, политика)
+Собираем:
+Ресурсные (люди/время/компетенции)
+Процессные/организационные
+Технические (наследие/архитектура)
+(Ссылка на Security корзину допустима, но не дублировать детали)
+✅ если понятно, что реально мешает
+⚠️ если ограничения не всплыли
+
+4. Имплементация — как будут внедрять/эксплуатировать
+Собираем:
+Кто внедряет (owner)
+Шаги (пилот → rollout)
+Окружения/доступы/подготовка данных (если релевантно)
+Обучение/поддержка/SLA (если обсуждалось)
+✅ если есть хотя бы набросок плана и владельца
+⚠️ если “как-то внедрим”
+
+5. Критерии успеха — как поймут, что получилось
+Собираем:
+1–3 метрики/критерия приемки
+Горизонт времени
+Базовый уровень/ожидание
+✅ если есть pass/fail
+⚠️ если “хотим лучше” без измеримости
+
+6. Открытые вопросы и риски — что неясно или может заблокировать
+Собираем:
+“Дыры” — как вопросы (что нужно уточнить)
+Блокеры (комплаенс, данные, интеграции, ресурсы)
+Противоречия (разные сигналы в разговоре)
+Неуверенно распознанные термины (искаженные англицизмы) — как кандидаты
+✅ если список короткий и конкретный
+⚠️ если всё “примерно понятно” без проверки
+"
+
+transcript_analysis_so = "{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/sales-call-analysis.schema.json",
+  "title": "SalesCallAnalysis",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["meta", "passport", "deal_track", "pilot_poc", "product_track"],
+  "properties": {
+    "meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "source", "meeting_type", "focus_weights"],
+      "properties": {
+        "schema_version": { "type": "string", "pattern": "^\\d+\\.\\d+$" },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["transcript_id", "transcript_format", "has_diarization", "has_timecodes", "language"],
+          "properties": {
+            "transcript_id": { "type": "string", "minLength": 1 },
+            "transcript_format": { "type": "string", "enum": ["txt", "vtt", "other"] },
+            "has_diarization": { "type": "boolean" },
+            "has_timecodes": { "type": "boolean" },
+            "language": { "type": "string", "minLength": 2, "maxLength": 16 }
+          }
+        },
+        "meeting_type": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["primary", "secondary", "signals"],
+          "properties": {
+            "primary": { "$ref": "#/$defs/MeetingTypeLabelConfidence" },
+            "secondary": {
+              "type": "array",
+              "maxItems": 2,
+              "items": { "$ref": "#/$defs/MeetingTypeLabelConfidence" }
+            },
+            "signals": {
+              "type": "array",
+              "maxItems": 6,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["text", "evidence"],
+                "properties": {
+                  "text": { "type": "string", "minLength": 1, "maxLength": 240 },
+                  "evidence": { "$ref": "#/$defs/EvidenceArray" }
+                }
+              }
+            }
+          }
+        },
+        "focus_weights": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["passport", "deal_track", "pilot_poc", "product_track"],
+          "properties": {
+            "passport": { "$ref": "#/$defs/Weight" },
+            "deal_track": { "$ref": "#/$defs/Weight" },
+            "pilot_poc": { "$ref": "#/$defs/Weight" },
+            "product_track": { "$ref": "#/$defs/Weight" }
+          }
+        }
+      }
+    },
+
+    "passport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["company", "offering", "stage"],
+      "properties": {
+        "company": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "group", "industry", "contacts"],
+          "properties": {
+            "name": { "$ref": "#/$defs/AtomicField" },
+            "group": { "$ref": "#/$defs/AtomicField" },
+            "industry": { "$ref": "#/$defs/AtomicField" },
+            "contacts": {
+              "type": "array",
+              "maxItems": 6,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["person", "role"],
+                "properties": {
+                  "person": { "$ref": "#/$defs/AtomicField" },
+                  "role": { "$ref": "#/$defs/AtomicField" }
+                }
+              }
+            }
+          }
+        },
+        "offering": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["primary_theme", "solution_candidates"],
+          "properties": {
+            "primary_theme": { "$ref": "#/$defs/AtomicField" },
+            "solution_candidates": {
+              "type": "array",
+              "maxItems": 5,
+              "items": { "$ref": "#/$defs/AtomicField" }
+            }
+          }
+        },
+        "stage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["value", "status", "confidence", "mode", "evidence"],
+          "properties": {
+            "value": {
+              "type": "string",
+              "enum": [
+                "lead",
+                "discovery",
+                "demo_workshop",
+                "proposal",
+                "negotiation",
+                "procurement",
+                "closed_won",
+                "closed_lost"
+              ]
+            },
+            "status": { "$ref": "#/$defs/Status" },
+            "confidence": { "$ref": "#/$defs/Confidence" },
+            "mode": { "type": "string", "enum": ["explicit", "inferred"] },
+            "evidence": { "$ref": "#/$defs/EvidenceArray" }
+          }
+        }
+      }
+    },
+
+    "deal_track": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "problem_impact",
+        "value_hypothesis",
+        "decision_people",
+        "timing_trigger",
+        "money_procurement",
+        "momentum_next_step",
+        "security_compliance_data"
+      ],
+      "properties": {
+        "problem_impact": { "$ref": "#/$defs/ItemsAndMissingQuestions" },
+        "value_hypothesis": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["items", "alternatives"],
+          "properties": {
+            "items": { "$ref": "#/$defs/AtomicItemArray" },
+            "alternatives": { "$ref": "#/$defs/AtomicItemArray" }
+          }
+        },
+        "decision_people": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["roles", "process"],
+          "properties": {
+            "roles": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["decision_maker", "champion", "owner", "blocker"],
+              "properties": {
+                "decision_maker": { "$ref": "#/$defs/AtomicField" },
+                "champion": { "$ref": "#/$defs/AtomicField" },
+                "owner": { "$ref": "#/$defs/AtomicField" },
+                "blocker": { "$ref": "#/$defs/AtomicField" }
+              }
+            },
+            "process": { "$ref": "#/$defs/AtomicItemArray" }
+          }
+        },
+        "timing_trigger": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["items", "cadence"],
+          "properties": {
+            "items": { "$ref": "#/$defs/AtomicItemArray" },
+            "cadence": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["next_contact", "deliverable"],
+              "properties": {
+                "next_contact": { "$ref": "#/$defs/AtomicField" },
+                "deliverable": { "$ref": "#/$defs/AtomicField" }
+              }
+            }
+          }
+        },
+        "money_procurement": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["budget", "unit_economics", "procurement", "price_sensitivity"],
+          "properties": {
+            "budget": { "$ref": "#/$defs/AtomicField" },
+            "unit_economics": { "$ref": "#/$defs/AtomicItemArray" },
+            "procurement": { "$ref": "#/$defs/AtomicItemArray" },
+            "price_sensitivity": { "$ref": "#/$defs/AtomicItemArray" }
+          }
+        },
+        "momentum_next_step": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["commitments", "next_step"],
+          "properties": {
+            "commitments": {
+              "type": "array",
+              "maxItems": 12,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["actor", "action", "when"],
+                "properties": {
+                  "actor": { "$ref": "#/$defs/ActorField" },
+                  "action": { "$ref": "#/$defs/AtomicField" },
+                  "when": { "$ref": "#/$defs/AtomicField" }
+                }
+              }
+            },
+            "next_step": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["what", "when", "goal"],
+              "properties": {
+                "what": { "$ref": "#/$defs/AtomicField" },
+                "when": { "$ref": "#/$defs/AtomicField" },
+                "goal": { "$ref": "#/$defs/AtomicField" }
+              }
+            }
+          }
+        },
+        "security_compliance_data": { "$ref": "#/$defs/ItemsAndMissingQuestions" }
+      }
+    },
+
+    "pilot_poc": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "goal",
+        "scope",
+        "inputs_from_client",
+        "outputs_from_vendor",
+        "success_criteria",
+        "timeline_checkpoints",
+        "owners"
+      ],
+      "properties": {
+        "status": { "$ref": "#/$defs/AtomicFieldStatusOnly" },
+        "goal": { "$ref": "#/$defs/AtomicField" },
+        "scope": { "$ref": "#/$defs/AtomicItemArray" },
+        "inputs_from_client": { "$ref": "#/$defs/AtomicItemArray" },
+        "outputs_from_vendor": { "$ref": "#/$defs/AtomicItemArray" },
+        "success_criteria": { "$ref": "#/$defs/AtomicItemArray" },
+        "timeline_checkpoints": { "$ref": "#/$defs/AtomicItemArray" },
+        "owners": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["client_owner", "vendor_owner"],
+          "properties": {
+            "client_owner": { "$ref": "#/$defs/AtomicField" },
+            "vendor_owner": { "$ref": "#/$defs/AtomicField" }
+          }
+        }
+      }
+    },
+
+    "product_track": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "use_case",
+        "requirements",
+        "constraints",
+        "implementation",
+        "success_criteria",
+        "open_questions_risks"
+      ],
+      "properties": {
+        "use_case": { "$ref": "#/$defs/AtomicItemArrayObject" },
+        "requirements": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["functional", "non_functional", "data_integrations"],
+          "properties": {
+            "functional": { "$ref": "#/$defs/AtomicItemArray" },
+            "non_functional": { "$ref": "#/$defs/AtomicItemArray" },
+            "data_integrations": { "$ref": "#/$defs/AtomicItemArray" }
+          }
+        },
+        "constraints": { "$ref": "#/$defs/AtomicItemArrayObject" },
+        "implementation": { "$ref": "#/$defs/AtomicItemArrayObject" },
+        "success_criteria": { "$ref": "#/$defs/AtomicItemArrayObject" },
+        "open_questions_risks": { "$ref": "#/$defs/AtomicItemArrayObject" }
+      }
+    }
+  },
+
+  "$defs": {
+    "Status": { "type": "string", "enum": ["present", "missing", "not_discussed", "uncertain"] },
+    "Confidence": { "type": "string", "enum": ["high", "medium", "low"] },
+    "Weight": { "type": "number", "minimum": 0, "maximum": 1 },
+
+    "MeetingTypeLabelConfidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "confidence"],
+      "properties": {
+        "label": {
+          "type": "string",
+          "enum": ["discovery", "demo_workshop", "tech_debug", "commercial", "exec_alignment"]
+        },
+        "confidence": { "$ref": "#/$defs/Confidence" }
+      }
+    },
+
+    "Evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["quote"],
+      "properties": {
+        "quote": { "type": "string", "minLength": 1, "maxLength": 280 },
+        "timecode": { "type": "string", "minLength": 4, "maxLength": 16 },
+        "loc": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["start", "end"],
+          "properties": {
+            "start": { "type": "integer", "minimum": 0 },
+            "end": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "source_id": { "type": "string", "minLength": 1 }
+      },
+      "anyOf": [
+        { "required": ["timecode"] },
+        { "required": ["loc"] }
+      ]
+    },
+
+    "EvidenceArray": {
+      "type": "array",
+      "maxItems": 4,
+      "items": { "$ref": "#/$defs/Evidence" }
+    },
+
+    "AtomicField": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "status", "confidence", "evidence"],
+      "properties": {
+        "value": { "type": "string" },
+        "status": { "$ref": "#/$defs/Status" },
+        "confidence": { "$ref": "#/$defs/Confidence" },
+        "evidence": { "$ref": "#/$defs/EvidenceArray" }
+      }
+    },
+
+    "AtomicFieldStatusOnly": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "status", "confidence", "evidence"],
+      "properties": {
+        "value": { "type": "string", "enum": ["present", "missing", "not_discussed", "uncertain"] },
+        "status": { "$ref": "#/$defs/Status" },
+        "confidence": { "$ref": "#/$defs/Confidence" },
+        "evidence": { "$ref": "#/$defs/EvidenceArray" }
+      }
+    },
+
+    "AtomicItemArray": {
+      "type": "array",
+      "maxItems": 12,
+      "items": { "$ref": "#/$defs/AtomicField" }
+    },
+
+    "AtomicItemArrayObject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items"],
+      "properties": {
+        "items": { "$ref": "#/$defs/AtomicItemArray" }
+      }
+    },
+
+    "ItemsAndMissingQuestions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "missing_questions"],
+      "properties": {
+        "items": { "$ref": "#/$defs/AtomicItemArray" },
+        "missing_questions": {
+          "type": "array",
+          "maxItems": 10,
+          "items": {
+            "allOf": [
+              { "$ref": "#/$defs/AtomicField" },
+              {
+                "properties": {
+                  "status": { "enum": ["missing", "not_discussed"] }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+
+    "ActorField": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "status", "confidence", "evidence"],
+      "properties": {
+        "value": { "type": "string", "enum": ["client", "vendor", "unknown"] },
+        "status": { "$ref": "#/$defs/Status" },
+        "confidence": { "$ref": "#/$defs/Confidence" },
+        "evidence": { "$ref": "#/$defs/EvidenceArray" }
+      }
+    }
+  }
+}
+
+"

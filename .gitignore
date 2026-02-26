@@ -1,0 +1,22 @@
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+
+# Node (if selected later)
+node_modules/
+dist/
+coverage/
+
+# Env / secrets
+.env
+.env.*
+
+# Temporary
+tmp/

@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Lint (placeholder command)
+        run: ./scripts/lint.sh
+
+      - name: Typecheck (placeholder command)
+        run: ./scripts/typecheck.sh
+
+      - name: Test (placeholder command)
+        run: ./scripts/test.sh
+
+      - name: Build (placeholder command)
+        run: ./scripts/build.sh
+
+      - name: Repo structure lint
+        run: python3 scripts/repo_lint.py
+
+      - name: Docs index up-to-date
+        run: python3 scripts/docs_index_check.py
+
+      - name: Architecture boundaries lint
+        run: python3 scripts/architecture_lint.py
