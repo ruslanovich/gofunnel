@@ -17,6 +17,7 @@ coverage/
 # Env / secrets
 .env
 .env.*
+!.env.example
 
 # Temporary
 tmp/
