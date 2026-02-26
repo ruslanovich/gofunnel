@@ -11,6 +11,14 @@
 - Decisions / ADR: `docs/05_decisions/`
 - Reference materials: `docs/06_reference/`
 
+## Key process docs and templates
+
+- Agent workflow (plan before code): `docs/02_architecture/agent_workflow.md`
+- MCP reference: `docs/06_reference/mcp.md`
+- Yandex Object Storage runbook: `docs/04_runbooks/yandex_object_storage.md`
+- ADR template: `docs/05_decisions/ADR_TEMPLATE.md`
+- Execution plan template: `docs/03_execution_plans/PLAN_TEMPLATE.md`
+
 ## Важные корневые документы
 
 - Agent map: `AGENTS.md`

@@ -20,6 +20,11 @@ REQUIRED_FILES = [
     ROOT / ".github" / "ISSUE_TEMPLATE" / "bug.md",
     ROOT / ".github" / "ISSUE_TEMPLATE" / "tech_debt.md",
     ROOT / "docs" / "00_index" / "README.md",
+    ROOT / "docs" / "02_architecture" / "agent_workflow.md",
+    ROOT / "docs" / "03_execution_plans" / "PLAN_TEMPLATE.md",
+    ROOT / "docs" / "04_runbooks" / "yandex_object_storage.md",
+    ROOT / "docs" / "05_decisions" / "ADR_TEMPLATE.md",
+    ROOT / "docs" / "06_reference" / "mcp.md",
 ]
 
 REQUIRED_DOC_DIRS = [

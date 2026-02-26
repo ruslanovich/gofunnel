@@ -1,7 +1,13 @@
-## Linked Plan / Issue
+## Planning & Decisions (required)
 
-- Execution plan: `docs/03_execution_plans/...`
+- Link to Execution Plan: `docs/03_execution_plans/...`
+- ADR link (if decisions made): `docs/05_decisions/...` or `N/A`
 - Issue: #
+
+## Research performed (required)
+
+- Local repo search: `yes/no` + 1 line summary
+- External docs via context7: `yes/no` + 1 line summary
 
 ## What Changed
 
@@ -15,24 +21,13 @@
 
 - 
 
-## How Tested
+## Docs updated (required)
 
-- [ ] Tests added
-- [ ] Tests updated
-- [ ] Tests not needed (explain below)
+- Docs updated: `yes/no` + which files
 
-Notes:
+## Tests (required)
 
-- 
-
-## Docs
-
-- [ ] Docs updated
-- [ ] Docs not required (reason below)
-
-Notes:
-
-- 
+- Tests: `yes/no` + which checks/tests were run
 
 ## Risks
 

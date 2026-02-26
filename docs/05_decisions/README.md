@@ -9,3 +9,7 @@
 - Decision
 - Consequences
 - Rollback plan
+
+Шаблон:
+
+- `docs/05_decisions/ADR_TEMPLATE.md`
