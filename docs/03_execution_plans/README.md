@@ -15,3 +15,7 @@
 - Risks & mitigations
 - Test plan
 - Docs to update
+
+Текущий активный план:
+
+- `docs/03_execution_plans/2026-02-26_epic-1-identity-onboarding-share.md`

@@ -1,0 +1,5 @@
+DROP TABLE IF EXISTS report_shares;
+DROP TABLE IF EXISTS invites;
+DROP TABLE IF EXISTS access_requests;
+DROP TABLE IF EXISTS sessions;
+DROP TABLE IF EXISTS users;

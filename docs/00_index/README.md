@@ -16,8 +16,18 @@
 - Agent workflow (plan before code): `docs/02_architecture/agent_workflow.md`
 - MCP reference: `docs/06_reference/mcp.md`
 - Yandex Object Storage runbook: `docs/04_runbooks/yandex_object_storage.md`
+- Admin bootstrap + migrations runbook: `docs/04_runbooks/admin_bootstrap.md`
 - ADR template: `docs/05_decisions/ADR_TEMPLATE.md`
 - Execution plan template: `docs/03_execution_plans/PLAN_TEMPLATE.md`
+
+## Recent planning artifacts (2026-02-26)
+
+- Epic 1 execution plan: `docs/03_execution_plans/2026-02-26_epic-1-identity-onboarding-share.md`
+- Epic 1 research notes (MCP/context7 + supabase): `docs/06_reference/2026-02-26_epic-1-identity-auth-research-notes.md`
+- ADR-0001 Auth library: `docs/05_decisions/2026-02-26_adr-0001_auth-library.md`
+- ADR-0002 Session strategy: `docs/05_decisions/2026-02-26_adr-0002_session-strategy.md`
+- ADR-0003 Rate limit storage: `docs/05_decisions/2026-02-26_adr-0003_rate-limit-storage.md`
+- ADR-0004 Token hashing: `docs/05_decisions/2026-02-26_adr-0004_token-hashing.md`
 
 ## Важные корневые документы
 
@@ -27,6 +37,13 @@
 - Reliability principles: `RELIABILITY.md`
 - Security principles: `SECURITY.md`
 - Quality scoring: `QUALITY_SCORE.md`
+
+## Runtime source directories (current)
+
+- `interfaces/` — transport entry points (CLI, HTTP)
+- `app/` — application/orchestration layer (auth use-cases)
+- `domain/` — domain types and business concepts
+- `infra/` — DB/security/integration implementations
 
 ## Стартовые документы (placeholders)
 

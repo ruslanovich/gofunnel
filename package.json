@@ -1,0 +1,26 @@
+{
+  "name": "gofunnel",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "db:migrate": "tsx interfaces/cli/db_migrate.ts up",
+    "db:rollback": "tsx interfaces/cli/db_migrate.ts down",
+    "db:migrate:status": "tsx interfaces/cli/db_migrate.ts status",
+    "bootstrap:admin": "tsx interfaces/cli/bootstrap_admin.ts",
+    "http:start": "tsx interfaces/http/server_main.ts",
+    "test": "./scripts/test.sh",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "argon2": "^0.44.0",
+    "dotenv": "^16.6.1",
+    "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.0",
+    "@types/pg": "^8.15.6",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}

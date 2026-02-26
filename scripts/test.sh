@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "TODO: wire real test command after stack selection"
+npx tsx --test interfaces/http/server.test.ts

@@ -7,3 +7,7 @@
 Полезные ссылки в репозитории:
 
 - `docs/06_reference/mcp.md`
+
+Актуальные research notes:
+
+- `docs/06_reference/2026-02-26_epic-1-identity-auth-research-notes.md`

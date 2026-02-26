@@ -1,0 +1,2128 @@
+import { afterEach, test } from "node:test";
+import assert from "node:assert/strict";
+import type { AddressInfo } from "node:net";
+
+import type {
+  AdminUserListItem,
+  AdminUserRepository,
+} from "../../app/admin_users/contracts.js";
+import { AdminUserService } from "../../app/admin_users/service.js";
+import type {
+  AccessRequestStatus,
+  AdminAccessRequest,
+  AccessRequestRepository,
+  CreateAccessRequestInput,
+  PersistAccessRequestAttemptInput,
+  PersistAccessRequestAttemptOutcome,
+} from "../../app/access_requests/contracts.js";
+import { ACCESS_REQUEST_RATE_LIMITS as ACCESS_REQUEST_LIMITS } from "../../app/access_requests/contracts.js";
+import { AccessRequestService } from "../../app/access_requests/service.js";
+import type {
+  AcceptInviteInput,
+  AcceptInviteOutcome,
+  InviteRepository,
+  PersistInviteForAdminInput,
+  PersistInviteForAdminOutcome,
+} from "../../app/invites/contracts.js";
+import { INVITE_TTL_MS, InviteService } from "../../app/invites/service.js";
+import type { ReportShareRepository, StoredReportShare } from "../../app/shares/contracts.js";
+import { ReportShareService } from "../../app/shares/service.js";
+import type {
+  AuthRepository,
+  CreateSessionInput,
+  StoredSessionWithUser,
+  StoredUserForLogin,
+} from "../../app/auth/contracts.js";
+import { AuthService } from "../../app/auth/service.js";
+import type { UserStatus } from "../../domain/auth/types.js";
+import { createAuthHttpServer } from "./server.js";
+
+const SITE_ORIGIN = "http://app.test";
+
+type StoredSession = StoredSessionWithUser;
+
+type InMemoryUserRecord = StoredUserForLogin & {
+  createdAt: Date;
+  lastLoginAt: Date | null;
+  disabledAt: Date | null;
+};
+
+class InMemoryAuthRepository implements AuthRepository, AdminUserRepository {
+  users = new Map<string, InMemoryUserRecord>();
+  sessions = new Map<string, StoredSession>();
+  lastSeenTouches = 0;
+  lastLoginTouches = 0;
+  private sessionCounter = 0;
+
+  async findUserByEmail(email: string): Promise<StoredUserForLogin | null> {
+    const user = this.users.get(email);
+    if (!user) {
+      return null;
+    }
+
+    return {
+      id: user.id,
+      email: user.email,
+      passwordHash: user.passwordHash,
+      role: user.role,
+      status: user.status,
+    };
+  }
+
+  async createSession(input: CreateSessionInput): Promise<{ sessionId: string }> {
+    const user = this.findUserRecordById(input.userId);
+    assert.ok(user, "user must exist before creating session");
+
+    const sessionId = `s_${++this.sessionCounter}`;
+    this.sessions.set(input.sessionTokenHash, {
+      sessionId,
+      sessionTokenHash: input.sessionTokenHash,
+      expiresAt: input.expiresAt,
+      invalidatedAt: null,
+      user: {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        status: user.status,
+      },
+    });
+
+    return { sessionId };
+  }
+
+  async deleteSessionByTokenHash(sessionTokenHash: string): Promise<void> {
+    this.sessions.delete(sessionTokenHash);
+  }
+
+  async findSessionByTokenHash(sessionTokenHash: string): Promise<StoredSessionWithUser | null> {
+    const session = this.sessions.get(sessionTokenHash);
+    if (!session) {
+      return null;
+    }
+
+    const user = this.findUserRecordById(session.user.id);
+    if (!user) {
+      return null;
+    }
+
+    return {
+      sessionId: session.sessionId,
+      sessionTokenHash: session.sessionTokenHash,
+      expiresAt: new Date(session.expiresAt),
+      invalidatedAt: session.invalidatedAt ? new Date(session.invalidatedAt) : null,
+      user: {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        status: user.status,
+      },
+    };
+  }
+
+  async touchSessionLastSeen(): Promise<void> {
+    this.lastSeenTouches += 1;
+  }
+
+  async touchUserLastLogin(userId: string, loggedInAt: Date): Promise<void> {
+    const user = this.findUserRecordById(userId);
+    assert.ok(user);
+    user.lastLoginAt = new Date(loggedInAt);
+    this.lastLoginTouches += 1;
+  }
+
+  async listUsersForAdmin(): Promise<AdminUserListItem[]> {
+    return [...this.users.values()]
+      .sort((a, b) => {
+        const createdDiff = b.createdAt.getTime() - a.createdAt.getTime();
+        if (createdDiff !== 0) {
+          return createdDiff;
+        }
+        return a.email.localeCompare(b.email);
+      })
+      .map((user) => ({
+        id: user.id,
+        createdAt: new Date(user.createdAt),
+        email: user.email,
+        role: user.role,
+        status: user.status,
+        lastLoginAt: user.lastLoginAt ? new Date(user.lastLoginAt) : null,
+      }));
+  }
+
+  async updateUserStatusForAdmin(input: {
+    id: string;
+    status: UserStatus;
+    now: Date;
+  }): Promise<AdminUserListItem | null> {
+    const user = this.findUserRecordById(input.id);
+    if (!user) {
+      return null;
+    }
+
+    user.status = input.status;
+    user.disabledAt = input.status === "disabled" ? new Date(input.now) : null;
+
+    return {
+      id: user.id,
+      createdAt: new Date(user.createdAt),
+      email: user.email,
+      role: user.role,
+      status: user.status,
+      lastLoginAt: user.lastLoginAt ? new Date(user.lastLoginAt) : null,
+    };
+  }
+
+  seedUser(user: StoredUserForLogin | InMemoryUserRecord): void {
+    const maybeRecord = user as Partial<InMemoryUserRecord>;
+    this.users.set(user.email, {
+      ...user,
+      createdAt: maybeRecord.createdAt ? new Date(maybeRecord.createdAt) : new Date(),
+      lastLoginAt: maybeRecord.lastLoginAt ? new Date(maybeRecord.lastLoginAt) : null,
+      disabledAt: maybeRecord.disabledAt
+        ? new Date(maybeRecord.disabledAt)
+        : user.status === "disabled"
+          ? new Date()
+          : null,
+    });
+  }
+
+  seedSession(session: StoredSessionWithUser): void {
+    this.sessions.set(session.sessionTokenHash, session);
+  }
+
+  private findUserRecordById(userId: string): InMemoryUserRecord | null {
+    return [...this.users.values()].find((candidate) => candidate.id === userId) ?? null;
+  }
+}
+
+type StoredAccessRequest = CreateAccessRequestInput & {
+  id: string;
+  status: AccessRequestStatus;
+  handledByUserId: string | null;
+  handledAt: Date | null;
+  createdAt: Date;
+};
+
+type RateLimitBucket = {
+  scope: "ip" | "email";
+  subjectHash: string;
+  bucketStartMs: number;
+  hitCount: number;
+};
+
+class InMemoryAccessRequestRepository implements AccessRequestRepository {
+  requests: StoredAccessRequest[] = [];
+  rateLimitBuckets = new Map<string, RateLimitBucket>();
+  private counter = 0;
+
+  async persistAccessRequestAttempt(
+    input: PersistAccessRequestAttemptInput,
+  ): Promise<PersistAccessRequestAttemptOutcome> {
+    const bucketStartMs = startOfHour(input.now).getTime();
+
+    if (input.ipHash) {
+      const ipHits = this.incrementBucket({
+        scope: "ip",
+        subjectHash: input.ipHash,
+        bucketStartMs,
+      });
+      if (ipHits > ACCESS_REQUEST_LIMITS.ipPerHour) {
+        return { kind: "rate_limited_ip" };
+      }
+    }
+
+    const emailHits = this.incrementBucket({
+      scope: "email",
+      subjectHash: input.emailHash,
+      bucketStartMs,
+    });
+    if (emailHits > ACCESS_REQUEST_LIMITS.emailPerHour) {
+      return { kind: "rate_limited_email" };
+    }
+
+    const duplicateCutoffMs = input.now.getTime() - 24 * 60 * 60 * 1_000;
+    const duplicate = this.requests.some(
+      (candidate) =>
+        candidate.email === input.email &&
+        (candidate.status === "new" || candidate.status === "contacted" || candidate.status === "approved") &&
+        candidate.createdAt.getTime() >= duplicateCutoffMs,
+    );
+    if (duplicate) {
+      return { kind: "duplicate_24h" };
+    }
+
+    const created: StoredAccessRequest = {
+      id: `ar_${++this.counter}`,
+      email: input.email,
+      fullName: input.fullName,
+      company: input.company,
+      message: input.message,
+      status: "new",
+      handledByUserId: null,
+      handledAt: null,
+      createdAt: new Date(input.now),
+    };
+
+    this.requests.push(created);
+
+    return {
+      kind: "created",
+      createdRequest: {
+        id: created.id,
+        status: created.status,
+        createdAt: created.createdAt,
+      },
+    };
+  }
+
+  async listForAdmin(input: { status?: AccessRequestStatus | null }): Promise<AdminAccessRequest[]> {
+    return this.requests
+      .filter((request) => (input.status ? request.status === input.status : true))
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .map((request) => ({
+        id: request.id,
+        email: request.email,
+        fullName: request.fullName,
+        company: request.company,
+        message: request.message,
+        status: request.status,
+        handledByUserId: request.handledByUserId,
+        handledAt: request.handledAt ? new Date(request.handledAt) : null,
+        createdAt: new Date(request.createdAt),
+      }));
+  }
+
+  async updateStatusForAdmin(input: {
+    id: string;
+    status: AccessRequestStatus;
+    handledByUserId: string;
+    now: Date;
+  }): Promise<AdminAccessRequest | null> {
+    const request = this.requests.find((candidate) => candidate.id === input.id);
+    if (!request) {
+      return null;
+    }
+
+    if (request.status !== input.status) {
+      request.status = input.status;
+      request.handledByUserId = input.handledByUserId;
+      request.handledAt = new Date(input.now);
+    }
+
+    return {
+      id: request.id,
+      email: request.email,
+      fullName: request.fullName,
+      company: request.company,
+      message: request.message,
+      status: request.status,
+      handledByUserId: request.handledByUserId,
+      handledAt: request.handledAt ? new Date(request.handledAt) : null,
+      createdAt: new Date(request.createdAt),
+    };
+  }
+
+  seedAccessRequest(
+    input: Partial<StoredAccessRequest> & Pick<StoredAccessRequest, "email">,
+  ): StoredAccessRequest {
+    const created: StoredAccessRequest = {
+      id: input.id ?? `ar_${++this.counter}`,
+      email: input.email,
+      fullName: input.fullName ?? null,
+      company: input.company ?? null,
+      message: input.message ?? null,
+      status: input.status ?? "new",
+      handledByUserId: input.handledByUserId ?? null,
+      handledAt: input.handledAt ? new Date(input.handledAt) : null,
+      createdAt: input.createdAt ? new Date(input.createdAt) : new Date(),
+    };
+
+    this.requests.push(created);
+    return created;
+  }
+
+  seedRateLimitBucket(input: {
+    scope: "ip" | "email";
+    subjectHash: string;
+    bucketStart: Date;
+    hitCount: number;
+  }): void {
+    const bucketStartMs = input.bucketStart.getTime();
+    this.rateLimitBuckets.set(this.bucketKey(input.scope, input.subjectHash, bucketStartMs), {
+      scope: input.scope,
+      subjectHash: input.subjectHash,
+      bucketStartMs,
+      hitCount: input.hitCount,
+    });
+  }
+
+  private incrementBucket(input: {
+    scope: "ip" | "email";
+    subjectHash: string;
+    bucketStartMs: number;
+  }): number {
+    const key = this.bucketKey(input.scope, input.subjectHash, input.bucketStartMs);
+    const existing = this.rateLimitBuckets.get(key);
+    if (existing) {
+      existing.hitCount += 1;
+      return existing.hitCount;
+    }
+
+    this.rateLimitBuckets.set(key, {
+      scope: input.scope,
+      subjectHash: input.subjectHash,
+      bucketStartMs: input.bucketStartMs,
+      hitCount: 1,
+    });
+    return 1;
+  }
+
+  private bucketKey(scope: "ip" | "email", subjectHash: string, bucketStartMs: number): string {
+    return `${scope}:${subjectHash}:${bucketStartMs}`;
+  }
+}
+
+type StoredInvite = {
+  id: string;
+  email: string;
+  tokenHash: string;
+  hashVersion: string;
+  createdByUserId: string;
+  createdAt: Date;
+  expiresAt: Date;
+  usedAt: Date | null;
+  usedByUserId: string | null;
+  revokedAt: Date | null;
+};
+
+class InMemoryInviteRepository implements InviteRepository {
+  invites: StoredInvite[] = [];
+  private inviteCounter = 0;
+  private acceptedUserCounter = 0;
+
+  constructor(
+    private readonly authRepository: InMemoryAuthRepository,
+    private readonly accessRequestRepository: InMemoryAccessRequestRepository,
+  ) {}
+
+  async findUserByEmail(email: string): Promise<{ id: string; status: UserStatus } | null> {
+    const user = this.authRepository.users.get(email);
+    if (!user) {
+      return null;
+    }
+
+    return {
+      id: user.id,
+      status: user.status,
+    };
+  }
+
+  async persistInviteForAdmin(
+    input: PersistInviteForAdminInput,
+  ): Promise<PersistInviteForAdminOutcome> {
+    if (input.accessRequestId) {
+      const request = this.accessRequestRepository.requests.find(
+        (candidate) => candidate.id === input.accessRequestId,
+      );
+      if (!request) {
+        return { kind: "access_request_not_found" };
+      }
+
+      if (
+        request.status !== "approved" ||
+        request.handledByUserId === null ||
+        request.handledAt === null
+      ) {
+        request.status = "approved";
+        request.handledByUserId = input.createdByUserId;
+        request.handledAt = new Date(input.handledAt);
+      }
+    }
+
+    this.invites.push({
+      id: `inv_${++this.inviteCounter}`,
+      email: input.email,
+      tokenHash: input.tokenHash,
+      hashVersion: input.hashVersion,
+      createdByUserId: input.createdByUserId,
+      createdAt: new Date(input.createdAt),
+      expiresAt: new Date(input.expiresAt),
+      usedAt: null,
+      usedByUserId: null,
+      revokedAt: null,
+    });
+
+    return { kind: "created" };
+  }
+
+  async acceptInvite(input: AcceptInviteInput): Promise<AcceptInviteOutcome> {
+    const invite = this.invites.find(
+      (candidate) =>
+        candidate.tokenHash === input.tokenHash &&
+        candidate.usedAt === null &&
+        candidate.revokedAt === null &&
+        candidate.expiresAt.getTime() > input.now.getTime(),
+    );
+
+    if (!invite) {
+      return { kind: "invalid_or_expired_token" };
+    }
+
+    const existingUser = this.authRepository.users.get(invite.email);
+    if (existingUser) {
+      return { kind: "user_exists" };
+    }
+
+    const createdUserId = `u_invite_${++this.acceptedUserCounter}`;
+    this.authRepository.seedUser({
+      id: createdUserId,
+      email: invite.email,
+      passwordHash: input.passwordHash,
+      role: "user",
+      status: "active",
+      createdAt: new Date(input.now),
+      lastLoginAt: null,
+      disabledAt: null,
+    });
+
+    invite.usedAt = new Date(input.now);
+    invite.usedByUserId = createdUserId;
+
+    return {
+      kind: "accepted",
+      user: {
+        id: createdUserId,
+        email: invite.email,
+        role: "user",
+        status: "active",
+      },
+    };
+  }
+
+  seedInvite(input: {
+    email: string;
+    tokenHash: string;
+    createdByUserId?: string;
+    createdAt?: Date;
+    expiresAt: Date;
+    usedAt?: Date | null;
+    usedByUserId?: string | null;
+    revokedAt?: Date | null;
+  }): StoredInvite {
+    const created: StoredInvite = {
+      id: `inv_${++this.inviteCounter}`,
+      email: input.email,
+      tokenHash: input.tokenHash,
+      hashVersion: "hmac-sha256-v1",
+      createdByUserId: input.createdByUserId ?? "admin_1",
+      createdAt: input.createdAt ? new Date(input.createdAt) : new Date(),
+      expiresAt: new Date(input.expiresAt),
+      usedAt: input.usedAt ? new Date(input.usedAt) : null,
+      usedByUserId: input.usedByUserId ?? null,
+      revokedAt: input.revokedAt ? new Date(input.revokedAt) : null,
+    };
+    this.invites.push(created);
+    return created;
+  }
+}
+
+type InMemoryStoredReportShare = {
+  id: string;
+  reportRef: string;
+  tokenHash: string;
+  createdAt: Date;
+  expiresAt: Date | null;
+  revokedAt: Date | null;
+};
+
+class InMemoryReportShareRepository implements ReportShareRepository {
+  shares: InMemoryStoredReportShare[] = [];
+  private counter = 0;
+
+  async findByTokenHash(tokenHash: string): Promise<StoredReportShare | null> {
+    const share = this.shares.find((candidate) => candidate.tokenHash === tokenHash);
+    if (!share) {
+      return null;
+    }
+
+    return {
+      reportRef: share.reportRef,
+      expiresAt: share.expiresAt ? new Date(share.expiresAt) : null,
+      revokedAt: share.revokedAt ? new Date(share.revokedAt) : null,
+    };
+  }
+
+  seedShare(input: {
+    reportRef: string;
+    tokenHash: string;
+    createdAt?: Date;
+    expiresAt?: Date | null;
+    revokedAt?: Date | null;
+  }): InMemoryStoredReportShare {
+    const created: InMemoryStoredReportShare = {
+      id: `shr_${++this.counter}`,
+      reportRef: input.reportRef,
+      tokenHash: input.tokenHash,
+      createdAt: input.createdAt ? new Date(input.createdAt) : new Date(),
+      expiresAt: input.expiresAt ? new Date(input.expiresAt) : null,
+      revokedAt: input.revokedAt ? new Date(input.revokedAt) : null,
+    };
+    this.shares.push(created);
+    return created;
+  }
+}
+
+const openServers = new Set<import("node:http").Server>();
+
+afterEach(async () => {
+  await Promise.all(
+    [...openServers].map(
+      (server) =>
+        new Promise<void>((resolve, reject) => {
+          server.close((error) => {
+            openServers.delete(server);
+            if (error) {
+              reject(error);
+              return;
+            }
+            resolve();
+          });
+        }),
+    ),
+  );
+});
+
+function createHarness() {
+  const repository = new InMemoryAuthRepository();
+  const accessRequestRepository = new InMemoryAccessRequestRepository();
+  const inviteRepository = new InMemoryInviteRepository(repository, accessRequestRepository);
+  const reportShareRepository = new InMemoryReportShareRepository();
+  let tokenCounter = 0;
+  let inviteTokenCounter = 0;
+  let inviteNow = new Date("2026-02-26T12:00:00.000Z");
+  let shareNow = new Date("2026-02-27T10:00:00.000Z");
+  const authService = new AuthService({
+    repository,
+    verifyPassword: async (password, passwordHash) =>
+      password === passwordHash || passwordHash === `argon2:${password}`,
+    hashToken: (token) => `hash:${token}`,
+    randomToken: () => `opaque_${++tokenCounter}`,
+  });
+  const accessRequestService = new AccessRequestService({
+    repository: accessRequestRepository,
+    hashRateLimitKey: (value) => `hash:${value}`,
+  });
+  const adminUserService = new AdminUserService({
+    repository,
+  });
+  const inviteService = new InviteService({
+    repository: inviteRepository,
+    hashToken: (token) => `hash:${token}`,
+    hashPassword: async (password) => `argon2:${password}`,
+    randomToken: () => `invite_${++inviteTokenCounter}`,
+    now: () => new Date(inviteNow),
+  });
+  const reportShareService = new ReportShareService({
+    repository: reportShareRepository,
+    hashToken: (token) => `hash:${token}`,
+    now: () => new Date(shareNow),
+  });
+
+  const server = createAuthHttpServer({
+    authService,
+    accessRequestService,
+    adminUserService,
+    inviteService,
+    reportShareService,
+    siteOrigin: SITE_ORIGIN,
+    secureCookies: false,
+  });
+  openServers.add(server);
+
+  return {
+    repository,
+    accessRequestRepository,
+    inviteRepository,
+    reportShareRepository,
+    authService,
+    adminUserService,
+    setInviteNow(value: Date) {
+      inviteNow = new Date(value);
+    },
+    setShareNow(value: Date) {
+      shareNow = new Date(value);
+    },
+    async start() {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+      const address = server.address() as AddressInfo;
+      return {
+        baseUrl: `http://127.0.0.1:${address.port}`,
+        server,
+      };
+    },
+  };
+}
+
+function seedUser(overrides: Partial<StoredUserForLogin> = {}): StoredUserForLogin {
+  return {
+    id: overrides.id ?? "u_1",
+    email: overrides.email ?? "user@example.com",
+    passwordHash: overrides.passwordHash ?? "secret-password",
+    role: overrides.role ?? "user",
+    status: overrides.status ?? "active",
+  };
+}
+
+function seedAdminUserRecord(
+  overrides: Partial<InMemoryUserRecord> = {},
+): InMemoryUserRecord {
+  const base = seedUser(overrides);
+  return {
+    ...base,
+    createdAt: overrides.createdAt ? new Date(overrides.createdAt) : new Date(),
+    lastLoginAt: overrides.lastLoginAt ? new Date(overrides.lastLoginAt) : null,
+    disabledAt: overrides.disabledAt ? new Date(overrides.disabledAt) : base.status === "disabled" ? new Date() : null,
+  };
+}
+
+function makeCookieValue(opaqueToken: string): string {
+  return `session=${encodeURIComponent(opaqueToken)}`;
+}
+
+function makeAccessRequestBody(overrides: Record<string, string>): URLSearchParams {
+  return new URLSearchParams({
+    website: "",
+    client_ts: String(Date.now() - 5_000),
+    ...overrides,
+  });
+}
+
+function seedAuthenticatedSession(
+  harness: ReturnType<typeof createHarness>,
+  userOverrides: Partial<StoredUserForLogin> = {},
+  opaqueToken = "opaque_1",
+): { user: StoredUserForLogin; cookie: string } {
+  const user = seedUser({
+    role: "user",
+    status: "active",
+    ...userOverrides,
+  });
+  harness.repository.seedUser(user);
+  harness.repository.seedSession({
+    sessionId: "s_1",
+    sessionTokenHash: `hash:${opaqueToken}`,
+    expiresAt: new Date(Date.now() + 60_000),
+    invalidatedAt: null,
+    user: {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      status: user.status,
+    },
+  });
+
+  return { user, cookie: makeCookieValue(opaqueToken) };
+}
+
+function startOfHour(value: Date): Date {
+  const copy = new Date(value);
+  copy.setMinutes(0, 0, 0);
+  return copy;
+}
+
+test("login success creates session and cookie", async () => {
+  const harness = createHarness();
+  harness.repository.seedUser(seedUser());
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/auth/login`, {
+    method: "POST",
+    redirect: "manual",
+    headers: {
+      Origin: SITE_ORIGIN,
+    },
+    body: new URLSearchParams({
+      email: "user@example.com",
+      password: "secret-password",
+    }),
+  });
+
+  assert.equal(response.status, 303);
+  assert.equal(response.headers.get("location"), "/app");
+  const setCookie = response.headers.get("set-cookie") ?? "";
+  assert.match(setCookie, /^session=/);
+  assert.match(setCookie, /HttpOnly/i);
+  assert.match(setCookie, /SameSite=Lax/i);
+  assert.match(setCookie, /Path=\//i);
+  assert.equal(harness.repository.sessions.size, 1);
+  assert.equal(harness.repository.lastLoginTouches, 1);
+});
+
+test("login invalid credentials returns 401", async () => {
+  const harness = createHarness();
+  harness.repository.seedUser(seedUser());
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/auth/login`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { Origin: SITE_ORIGIN },
+    body: new URLSearchParams({ email: "user@example.com", password: "wrong" }),
+  });
+
+  assert.equal(response.status, 401);
+  assert.equal(await response.text(), "invalid_credentials");
+  assert.equal(harness.repository.sessions.size, 0);
+});
+
+test("disabled user login blocked with 403", async () => {
+  const harness = createHarness();
+  harness.repository.seedUser(seedUser({ status: "disabled" }));
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/auth/login`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { Origin: SITE_ORIGIN },
+    body: new URLSearchParams({ email: "user@example.com", password: "secret-password" }),
+  });
+
+  assert.equal(response.status, 403);
+  assert.equal(await response.text(), "user_disabled");
+  assert.equal(harness.repository.sessions.size, 0);
+});
+
+test("logout clears session", async () => {
+  const harness = createHarness();
+  harness.repository.seedUser(seedUser());
+  const { baseUrl } = await harness.start();
+
+  const loginResponse = await fetch(`${baseUrl}/api/auth/login`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { Origin: SITE_ORIGIN },
+    body: new URLSearchParams({ email: "user@example.com", password: "secret-password" }),
+  });
+  const setCookie = loginResponse.headers.get("set-cookie") ?? "";
+  const cookieHeader = setCookie.split(";")[0] ?? "";
+  assert.ok(cookieHeader.startsWith("session="));
+  assert.equal(harness.repository.sessions.size, 1);
+
+  const logoutResponse = await fetch(`${baseUrl}/api/auth/logout`, {
+    method: "POST",
+    redirect: "manual",
+    headers: {
+      Origin: SITE_ORIGIN,
+      Cookie: cookieHeader,
+    },
+    body: new URLSearchParams(),
+  });
+
+  assert.equal(logoutResponse.status, 303);
+  assert.equal(logoutResponse.headers.get("location"), "/login");
+  const clearCookie = logoutResponse.headers.get("set-cookie") ?? "";
+  assert.match(clearCookie, /Max-Age=0/i);
+  assert.equal(harness.repository.sessions.size, 0);
+});
+
+test("expired session rejected for /app", async () => {
+  const harness = createHarness();
+  const user = seedUser();
+  harness.repository.seedUser(user);
+  harness.repository.seedSession({
+    sessionId: "s_expired",
+    sessionTokenHash: "hash:expired_1",
+    expiresAt: new Date(Date.now() - 60_000),
+    invalidatedAt: null,
+    user: {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      status: user.status,
+    },
+  });
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/app`, {
+    redirect: "manual",
+    headers: { Cookie: makeCookieValue("expired_1") },
+  });
+
+  assert.equal(response.status, 303);
+  assert.equal(response.headers.get("location"), "/login?next=%2Fapp");
+  assert.equal(harness.repository.lastSeenTouches, 0);
+});
+
+test("non-admin blocked from /admin/*", async () => {
+  const harness = createHarness();
+  const user = seedUser({ role: "user" });
+  harness.repository.seedUser(user);
+  harness.repository.seedSession({
+    sessionId: "s_1",
+    sessionTokenHash: "hash:opaque_1",
+    expiresAt: new Date(Date.now() + 60_000),
+    invalidatedAt: null,
+    user: {
+      id: user.id,
+      email: user.email,
+      role: "user",
+      status: "active",
+    },
+  });
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/admin/settings`, {
+    redirect: "manual",
+    headers: { Cookie: makeCookieValue("opaque_1") },
+  });
+
+  assert.equal(response.status, 403);
+  assert.equal(await response.text(), "admin_only");
+});
+
+test("admin can list access requests via admin api with status filter", async () => {
+  const harness = createHarness();
+  seedAuthenticatedSession(harness, {
+    id: "admin_1",
+    email: "admin@example.com",
+    role: "admin",
+  });
+  harness.accessRequestRepository.seedAccessRequest({
+    id: "ar_old",
+    email: "first@example.com",
+    fullName: "First",
+    company: "Old Co",
+    message: "Old note",
+    status: "approved",
+    handledByUserId: "admin_9",
+    handledAt: new Date("2026-02-26T09:00:00.000Z"),
+    createdAt: new Date("2026-02-26T08:00:00.000Z"),
+  });
+  harness.accessRequestRepository.seedAccessRequest({
+    id: "ar_new",
+    email: "second@example.com",
+    fullName: "Second",
+    company: "New Co",
+    message: "Need access",
+    status: "new",
+    createdAt: new Date("2026-02-26T10:00:00.000Z"),
+  });
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/admin/access-requests?status=new`, {
+    headers: { Cookie: makeCookieValue("opaque_1") },
+  });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    items: [
+      {
+        id: "ar_new",
+        created_at: "2026-02-26T10:00:00.000Z",
+        email: "second@example.com",
+        name: "Second",
+        company: "New Co",
+        note: "Need access",
+        status: "new",
+        handled_by: null,
+        handled_at: null,
+      },
+    ],
+  });
+});
+
+test("admin access requests page renders create invite action inline", async () => {
+  const harness = createHarness();
+  seedAuthenticatedSession(harness, {
+    id: "admin_1",
+    email: "admin@example.com",
+    role: "admin",
+  });
+  harness.accessRequestRepository.seedAccessRequest({
+    id: "ar_1",
+    email: "lead@example.com",
+    status: "new",
+  });
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/admin/access-requests`, {
+    headers: { Cookie: makeCookieValue("opaque_1") },
+  });
+
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /Create invite/);
+  assert.match(html, /access-request-invite-form/);
+  assert.match(html, /access-request-copy-button/);
+});
+
+test("non-admin cannot list or patch admin access requests api", async () => {
+  const harness = createHarness();
+  seedAuthenticatedSession(harness, {
+    id: "u_1",
+    email: "user@example.com",
+    role: "user",
+  });
+  harness.accessRequestRepository.seedAccessRequest({
+    id: "ar_1",
+    email: "lead@example.com",
+  });
+  const { baseUrl } = await harness.start();
+  const cookie = makeCookieValue("opaque_1");
+
+  const listResponse = await fetch(`${baseUrl}/api/admin/access-requests`, {
+    headers: { Cookie: cookie },
+  });
+  assert.equal(listResponse.status, 403);
+  assert.equal(await listResponse.text(), "admin_only");
+
+  const patchResponse = await fetch(`${baseUrl}/api/admin/access-requests/ar_1`, {
+    method: "PATCH",
+    headers: {
+      Cookie: cookie,
+      Origin: SITE_ORIGIN,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ status: "approved" }),
+  });
+  assert.equal(patchResponse.status, 403);
+  assert.equal(await patchResponse.text(), "admin_only");
+});
+
+test("admin can transition access request status and handled fields are set", async () => {
+  const harness = createHarness();
+  const { user, cookie } = seedAuthenticatedSession(
+    harness,
+    {
+      id: "admin_42",
+      email: "admin@example.com",
+      role: "admin",
+    },
+    "admin_token",
+  );
+  harness.accessRequestRepository.seedAccessRequest({
+    id: "ar_1",
+    email: "lead@example.com",
+    fullName: "Lead",
+    status: "new",
+    createdAt: new Date("2026-02-26T10:00:00.000Z"),
+  });
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/admin/access-requests/ar_1`, {
+    method: "PATCH",
+    headers: {
+      Cookie: cookie,
+      Origin: SITE_ORIGIN,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ status: "contacted" }),
+  });
+
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as {
+    ok: boolean;
+    item: { status: string; handled_by: string | null; handled_at: string | null };
+  };
+  assert.equal(payload.ok, true);
+  assert.equal(payload.item.status, "contacted");
+  assert.equal(payload.item.handled_by, user.id);
+  assert.ok(payload.item.handled_at);
+
+  const stored = harness.accessRequestRepository.requests.find((candidate) => candidate.id === "ar_1");
+  assert.ok(stored);
+  assert.equal(stored.status, "contacted");
+  assert.equal(stored.handledByUserId, user.id);
+  assert.ok(stored.handledAt instanceof Date);
+});
+
+test("admin patch rejects invalid access request status", async () => {
+  const harness = createHarness();
+  const { cookie } = seedAuthenticatedSession(harness, {
+    id: "admin_1",
+    email: "admin@example.com",
+    role: "admin",
+  });
+  harness.accessRequestRepository.seedAccessRequest({
+    id: "ar_1",
+    email: "lead@example.com",
+    status: "new",
+  });
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/admin/access-requests/ar_1`, {
+    method: "PATCH",
+    headers: {
+      Cookie: cookie,
+      Origin: SITE_ORIGIN,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ status: "pending_review" }),
+  });
+
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: "invalid_status" });
+  assert.equal(harness.accessRequestRepository.requests[0]?.status, "new");
+});
+
+test("admin patch returns 404 for unknown access request id", async () => {
+  const harness = createHarness();
+  const { cookie } = seedAuthenticatedSession(harness, {
+    id: "admin_1",
+    email: "admin@example.com",
+    role: "admin",
+  });
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/admin/access-requests/ar_missing`, {
+    method: "PATCH",
+    headers: {
+      Cookie: cookie,
+      Origin: SITE_ORIGIN,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ status: "approved" }),
+  });
+
+  assert.equal(response.status, 404);
+  assert.deepEqual(await response.json(), { error: "not_found" });
+});
+
+test("admin can create invite and only token hash is stored", async () => {
+  const harness = createHarness();
+  const { cookie } = seedAuthenticatedSession(harness, {
+    id: "admin_1",
+    email: "admin@example.com",
+    role: "admin",
+  });
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/admin/invites`, {
+    method: "POST",
+    headers: {
+      Cookie: cookie,
+      Origin: SITE_ORIGIN,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      email: "  New.User@Example.COM  ",
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as { invite_link: string };
+  assert.match(payload.invite_link, /^http:\/\/app\.test\/invite\//);
+  const inviteToken = payload.invite_link.split("/invite/")[1];
+  assert.ok(inviteToken);
+
+  assert.equal(harness.inviteRepository.invites.length, 1);
+  const storedInvite = harness.inviteRepository.invites[0];
+  assert.equal(storedInvite?.email, "new.user@example.com");
+  assert.equal(storedInvite?.tokenHash, `hash:${inviteToken}`);
+  assert.notEqual(storedInvite?.tokenHash, inviteToken);
+});
+
+test("non-admin cannot create invite via admin api", async () => {
+  const harness = createHarness();
+  const { cookie } = seedAuthenticatedSession(harness, {
+    id: "u_1",
+    email: "user@example.com",
+    role: "user",
+  });
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/admin/invites`, {
+    method: "POST",
+    headers: {
+      Cookie: cookie,
+      Origin: SITE_ORIGIN,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      email: "lead@example.com",
+    }),
+  });
+
+  assert.equal(response.status, 403);
+  assert.equal(await response.text(), "admin_only");
+});
+
+test("unauthenticated cannot create invite via admin api", async () => {
+  const harness = createHarness();
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/admin/invites`, {
+    method: "POST",
+    headers: {
+      Origin: SITE_ORIGIN,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      email: "lead@example.com",
+    }),
+  });
+
+  assert.equal(response.status, 401);
+  assert.equal(await response.text(), "auth_required");
+});
+
+test("invite ttl is 7 days", async () => {
+  const harness = createHarness();
+  harness.setInviteNow(new Date("2026-03-10T12:34:56.000Z"));
+  const { cookie } = seedAuthenticatedSession(harness, {
+    id: "admin_1",
+    email: "admin@example.com",
+    role: "admin",
+  });
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/admin/invites`, {
+    method: "POST",
+    headers: {
+      Cookie: cookie,
+      Origin: SITE_ORIGIN,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      email: "lead@example.com",
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  const storedInvite = harness.inviteRepository.invites[0];
+  assert.ok(storedInvite);
+  assert.equal(storedInvite.createdAt.toISOString(), "2026-03-10T12:34:56.000Z");
+  assert.equal(storedInvite.expiresAt.getTime() - storedInvite.createdAt.getTime(), INVITE_TTL_MS);
+  assert.equal(storedInvite.expiresAt.toISOString(), "2026-03-17T12:34:56.000Z");
+});
+
+test("create invite with access_request_id approves request and sets handled fields", async () => {
+  const harness = createHarness();
+  const { user, cookie } = seedAuthenticatedSession(
+    harness,
+    {
+      id: "admin_42",
+      email: "admin@example.com",
+      role: "admin",
+    },
+    "admin_token",
+  );
+  harness.accessRequestRepository.seedAccessRequest({
+    id: "ar_1",
+    email: "lead@example.com",
+    status: "new",
+    handledByUserId: null,
+    handledAt: null,
+  });
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/admin/invites`, {
+    method: "POST",
+    headers: {
+      Cookie: cookie,
+      Origin: SITE_ORIGIN,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      email: "lead@example.com",
+      access_request_id: "ar_1",
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  const storedRequest = harness.accessRequestRepository.requests.find((candidate) => candidate.id === "ar_1");
+  assert.ok(storedRequest);
+  assert.equal(storedRequest.status, "approved");
+  assert.equal(storedRequest.handledByUserId, user.id);
+  assert.ok(storedRequest.handledAt instanceof Date);
+});
+
+test("create invite rejects invalid email", async () => {
+  const harness = createHarness();
+  const { cookie } = seedAuthenticatedSession(harness, {
+    id: "admin_1",
+    email: "admin@example.com",
+    role: "admin",
+  });
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/admin/invites`, {
+    method: "POST",
+    headers: {
+      Cookie: cookie,
+      Origin: SITE_ORIGIN,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      email: "not-an-email",
+    }),
+  });
+
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: "invalid_email" });
+});
+
+test("create invite returns 409 when active user already exists", async () => {
+  const harness = createHarness();
+  const { cookie } = seedAuthenticatedSession(harness, {
+    id: "admin_1",
+    email: "admin@example.com",
+    role: "admin",
+  });
+  harness.repository.seedUser(
+    seedAdminUserRecord({
+      id: "u_existing",
+      email: "existing@example.com",
+      status: "active",
+      role: "user",
+    }),
+  );
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/admin/invites`, {
+    method: "POST",
+    headers: {
+      Cookie: cookie,
+      Origin: SITE_ORIGIN,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      email: "existing@example.com",
+    }),
+  });
+
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), { error: "user_exists" });
+  assert.equal(harness.inviteRepository.invites.length, 0);
+});
+
+test("invite page renders minimal set-password form", async () => {
+  const harness = createHarness();
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/invite/invite_token_1`);
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /<h1>Set password<\/h1>/);
+  assert.match(html, /name="password"/);
+  assert.match(html, /name="token"/);
+  assert.match(html, /invite_token_1/);
+});
+
+test("accept invite happy path creates user marks invite used issues session and allows /app", async () => {
+  const harness = createHarness();
+  const { baseUrl } = await harness.start();
+  harness.inviteRepository.seedInvite({
+    email: "invitee@example.com",
+    tokenHash: "hash:invite_accept_1",
+    expiresAt: new Date(Date.now() + 60_000),
+  });
+
+  const response = await fetch(`${baseUrl}/api/auth/accept-invite`, {
+    method: "POST",
+    headers: {
+      Origin: SITE_ORIGIN,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      token: "invite_accept_1",
+      password: "VerySecure123",
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    ok: true,
+    redirect_to: "/app",
+  });
+
+  const setCookie = response.headers.get("set-cookie") ?? "";
+  assert.match(setCookie, /^session=/);
+  const cookie = setCookie.split(";")[0] ?? "";
+
+  const createdUser = harness.repository.users.get("invitee@example.com");
+  assert.ok(createdUser);
+  assert.equal(createdUser.role, "user");
+  assert.equal(createdUser.status, "active");
+  assert.equal(createdUser.passwordHash, "argon2:VerySecure123");
+
+  const storedInvite = harness.inviteRepository.invites[0];
+  assert.ok(storedInvite);
+  assert.ok(storedInvite.usedAt instanceof Date);
+  assert.equal(storedInvite.usedByUserId, createdUser.id);
+
+  const appResponse = await fetch(`${baseUrl}/app`, {
+    headers: { Cookie: cookie },
+    redirect: "manual",
+  });
+  assert.equal(appResponse.status, 200);
+});
+
+test("accept invite cannot be reused after successful acceptance", async () => {
+  const harness = createHarness();
+  const { baseUrl } = await harness.start();
+  harness.inviteRepository.seedInvite({
+    email: "once@example.com",
+    tokenHash: "hash:invite_once_1",
+    expiresAt: new Date(Date.now() + 60_000),
+  });
+
+  const first = await fetch(`${baseUrl}/api/auth/accept-invite`, {
+    method: "POST",
+    headers: {
+      Origin: SITE_ORIGIN,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      token: "invite_once_1",
+      password: "VerySecure123",
+    }),
+  });
+  assert.equal(first.status, 200);
+
+  const second = await fetch(`${baseUrl}/api/auth/accept-invite`, {
+    method: "POST",
+    headers: {
+      Origin: SITE_ORIGIN,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      token: "invite_once_1",
+      password: "VerySecure123",
+    }),
+  });
+  assert.equal(second.status, 400);
+  assert.deepEqual(await second.json(), { error: "invalid_or_expired_token" });
+});
+
+test("accept invite blocks expired token", async () => {
+  const harness = createHarness();
+  harness.setInviteNow(new Date("2026-03-10T12:00:00.000Z"));
+  const { baseUrl } = await harness.start();
+  harness.inviteRepository.seedInvite({
+    email: "expired@example.com",
+    tokenHash: "hash:invite_expired_1",
+    expiresAt: new Date("2026-03-10T11:59:59.000Z"),
+  });
+
+  const response = await fetch(`${baseUrl}/api/auth/accept-invite`, {
+    method: "POST",
+    headers: {
+      Origin: SITE_ORIGIN,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      token: "invite_expired_1",
+      password: "VerySecure123",
+    }),
+  });
+
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: "invalid_or_expired_token" });
+});
+
+test("accept invite blocks invalid token", async () => {
+  const harness = createHarness();
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/auth/accept-invite`, {
+    method: "POST",
+    headers: {
+      Origin: SITE_ORIGIN,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      token: "does_not_exist",
+      password: "VerySecure123",
+    }),
+  });
+
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: "invalid_or_expired_token" });
+});
+
+test("accept invite returns 409 when invited email already exists", async () => {
+  const harness = createHarness();
+  const { baseUrl } = await harness.start();
+  harness.repository.seedUser(
+    seedAdminUserRecord({
+      id: "u_existing",
+      email: "existing@example.com",
+      passwordHash: "secret-password",
+      role: "user",
+      status: "active",
+    }),
+  );
+  harness.inviteRepository.seedInvite({
+    email: "existing@example.com",
+    tokenHash: "hash:invite_user_exists_1",
+    expiresAt: new Date(Date.now() + 60_000),
+  });
+
+  const response = await fetch(`${baseUrl}/api/auth/accept-invite`, {
+    method: "POST",
+    headers: {
+      Origin: SITE_ORIGIN,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      token: "invite_user_exists_1",
+      password: "VerySecure123",
+    }),
+  });
+
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), { error: "user_exists" });
+  assert.equal(harness.inviteRepository.invites[0]?.usedAt, null);
+});
+
+test("accept invite concurrent attempts allow only one success", async () => {
+  const harness = createHarness();
+  const { baseUrl } = await harness.start();
+  harness.inviteRepository.seedInvite({
+    email: "race@example.com",
+    tokenHash: "hash:invite_race_1",
+    expiresAt: new Date(Date.now() + 60_000),
+  });
+
+  const [first, second] = await Promise.all([
+    fetch(`${baseUrl}/api/auth/accept-invite`, {
+      method: "POST",
+      headers: {
+        Origin: SITE_ORIGIN,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        token: "invite_race_1",
+        password: "VerySecure123",
+      }),
+    }),
+    fetch(`${baseUrl}/api/auth/accept-invite`, {
+      method: "POST",
+      headers: {
+        Origin: SITE_ORIGIN,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        token: "invite_race_1",
+        password: "VerySecure123",
+      }),
+    }),
+  ]);
+
+  const statuses = [first.status, second.status].sort((a, b) => a - b);
+  assert.deepEqual(statuses, [200, 400]);
+  assert.equal(harness.repository.sessions.size, 1);
+  assert.ok(harness.inviteRepository.invites[0]?.usedAt instanceof Date);
+});
+
+test("admin users page renders table with inline enable/disable actions", async () => {
+  const harness = createHarness();
+  seedAuthenticatedSession(harness, {
+    id: "admin_1",
+    email: "admin@example.com",
+    role: "admin",
+  });
+  harness.repository.seedUser(
+    seedAdminUserRecord({
+      id: "u_active",
+      email: "active@example.com",
+      status: "active",
+    }),
+  );
+  harness.repository.seedUser(
+    seedAdminUserRecord({
+      id: "u_disabled",
+      email: "disabled@example.com",
+      status: "disabled",
+      disabledAt: new Date("2026-02-26T10:00:00.000Z"),
+    }),
+  );
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/admin/users`, {
+    headers: { Cookie: makeCookieValue("opaque_1") },
+  });
+
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /<th>created_at<\/th>/);
+  assert.match(html, /<th>email<\/th>/);
+  assert.match(html, /<th>role<\/th>/);
+  assert.match(html, /<th>status<\/th>/);
+  assert.match(html, /<th>last_login_at<\/th>/);
+  assert.match(html, /active@example\.com/);
+  assert.match(html, /disabled@example\.com/);
+  assert.match(html, />Disable<\/button>/);
+  assert.match(html, />Enable<\/button>/);
+});
+
+test("admin can list users via admin api", async () => {
+  const harness = createHarness();
+  seedAuthenticatedSession(harness, {
+    id: "admin_1",
+    email: "admin@example.com",
+    role: "admin",
+  });
+  harness.repository.seedUser(
+    seedAdminUserRecord({
+      id: "u_old",
+      email: "old@example.com",
+      role: "user",
+      status: "disabled",
+      createdAt: new Date("2026-02-26T08:00:00.000Z"),
+      lastLoginAt: new Date("2026-02-25T10:00:00.000Z"),
+      disabledAt: new Date("2026-02-26T09:00:00.000Z"),
+    }),
+  );
+  harness.repository.seedUser(
+    seedAdminUserRecord({
+      id: "u_new",
+      email: "new@example.com",
+      role: "user",
+      status: "active",
+      createdAt: new Date("2026-02-26T12:00:00.000Z"),
+      lastLoginAt: null,
+      disabledAt: null,
+    }),
+  );
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/admin/users`, {
+    headers: { Cookie: makeCookieValue("opaque_1") },
+  });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    items: [
+      {
+        id: "admin_1",
+        created_at: harness.repository.users.get("admin@example.com")?.createdAt.toISOString(),
+        email: "admin@example.com",
+        role: "admin",
+        status: "active",
+        last_login_at: null,
+      },
+      {
+        id: "u_new",
+        created_at: "2026-02-26T12:00:00.000Z",
+        email: "new@example.com",
+        role: "user",
+        status: "active",
+        last_login_at: null,
+      },
+      {
+        id: "u_old",
+        created_at: "2026-02-26T08:00:00.000Z",
+        email: "old@example.com",
+        role: "user",
+        status: "disabled",
+        last_login_at: "2026-02-25T10:00:00.000Z",
+      },
+    ],
+  });
+});
+
+test("non-admin cannot list or patch admin users api", async () => {
+  const harness = createHarness();
+  seedAuthenticatedSession(harness, {
+    id: "u_1",
+    email: "user@example.com",
+    role: "user",
+  });
+  harness.repository.seedUser(seedUser({ id: "u_2", email: "other@example.com" }));
+  const { baseUrl } = await harness.start();
+  const cookie = makeCookieValue("opaque_1");
+
+  const listResponse = await fetch(`${baseUrl}/api/admin/users`, {
+    headers: { Cookie: cookie },
+  });
+  assert.equal(listResponse.status, 403);
+  assert.equal(await listResponse.text(), "admin_only");
+
+  const patchResponse = await fetch(`${baseUrl}/api/admin/users/u_2`, {
+    method: "PATCH",
+    headers: {
+      Cookie: cookie,
+      Origin: SITE_ORIGIN,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ status: "disabled" }),
+  });
+  assert.equal(patchResponse.status, 403);
+  assert.equal(await patchResponse.text(), "admin_only");
+});
+
+test("admin disable/enable user updates status and disabled user session fails on next /app request", async () => {
+  const harness = createHarness();
+  const { cookie: adminCookie } = seedAuthenticatedSession(
+    harness,
+    {
+      id: "admin_1",
+      email: "admin@example.com",
+      role: "admin",
+    },
+    "admin_token",
+  );
+  harness.repository.seedUser(
+    seedAdminUserRecord({
+      id: "u_member",
+      email: "member@example.com",
+      passwordHash: "secret-password",
+      role: "user",
+      status: "active",
+      createdAt: new Date("2026-02-26T11:00:00.000Z"),
+    }),
+  );
+  const { baseUrl } = await harness.start();
+
+  const loginResponse = await fetch(`${baseUrl}/api/auth/login`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { Origin: SITE_ORIGIN },
+    body: new URLSearchParams({
+      email: "member@example.com",
+      password: "secret-password",
+    }),
+  });
+  assert.equal(loginResponse.status, 303);
+  const userCookie = (loginResponse.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+  assert.ok(userCookie.startsWith("session="));
+
+  const appBeforeDisable = await fetch(`${baseUrl}/app`, {
+    headers: { Cookie: userCookie },
+    redirect: "manual",
+  });
+  assert.equal(appBeforeDisable.status, 200);
+
+  const disableResponse = await fetch(`${baseUrl}/api/admin/users/u_member`, {
+    method: "PATCH",
+    headers: {
+      Cookie: adminCookie,
+      Origin: SITE_ORIGIN,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ status: "disabled" }),
+  });
+  assert.equal(disableResponse.status, 200);
+  assert.equal(harness.repository.users.get("member@example.com")?.status, "disabled");
+  assert.ok(harness.repository.users.get("member@example.com")?.disabledAt instanceof Date);
+
+  const appAfterDisable = await fetch(`${baseUrl}/app`, {
+    headers: { Cookie: userCookie },
+    redirect: "manual",
+  });
+  assert.equal(appAfterDisable.status, 303);
+  assert.equal(appAfterDisable.headers.get("location"), "/login?next=%2Fapp");
+
+  const enableResponse = await fetch(`${baseUrl}/api/admin/users/u_member`, {
+    method: "PATCH",
+    headers: {
+      Cookie: adminCookie,
+      Origin: SITE_ORIGIN,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ status: "active" }),
+  });
+  assert.equal(enableResponse.status, 200);
+  assert.equal(harness.repository.users.get("member@example.com")?.status, "active");
+  assert.equal(harness.repository.users.get("member@example.com")?.disabledAt, null);
+});
+
+test("admin patch rejects invalid user status", async () => {
+  const harness = createHarness();
+  const { cookie } = seedAuthenticatedSession(harness, {
+    id: "admin_1",
+    email: "admin@example.com",
+    role: "admin",
+  });
+  harness.repository.seedUser(seedUser({ id: "u_2", email: "other@example.com" }));
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/admin/users/u_2`, {
+    method: "PATCH",
+    headers: {
+      Cookie: cookie,
+      Origin: SITE_ORIGIN,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ status: "paused" }),
+  });
+
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: "invalid_status" });
+  assert.equal(harness.repository.users.get("other@example.com")?.status, "active");
+});
+
+test("admin patch returns 404 for unknown user id", async () => {
+  const harness = createHarness();
+  const { cookie } = seedAuthenticatedSession(harness, {
+    id: "admin_1",
+    email: "admin@example.com",
+    role: "admin",
+  });
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/admin/users/u_missing`, {
+    method: "PATCH",
+    headers: {
+      Cookie: cookie,
+      Origin: SITE_ORIGIN,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ status: "disabled" }),
+  });
+
+  assert.equal(response.status, 404);
+  assert.deepEqual(await response.json(), { error: "not_found" });
+});
+
+test("unauthenticated /app redirects to /login with next", async () => {
+  const harness = createHarness();
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/app`, {
+    redirect: "manual",
+  });
+
+  assert.equal(response.status, 303);
+  assert.equal(response.headers.get("location"), "/login?next=%2Fapp");
+});
+
+test("unauthenticated /share/<token> redirects to /login with next", async () => {
+  const harness = createHarness();
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/share/share_token_1`, {
+    redirect: "manual",
+  });
+
+  assert.equal(response.status, 303);
+  assert.equal(response.headers.get("location"), "/login?next=%2Fshare%2Fshare_token_1");
+});
+
+test("share login redirect preserves exact next path after authentication", async () => {
+  const harness = createHarness();
+  harness.repository.seedUser(
+    seedUser({
+      email: "member@example.com",
+      passwordHash: "member-password",
+    }),
+  );
+  harness.reportShareRepository.seedShare({
+    reportRef: "report_login_redirect_1",
+    tokenHash: "hash:share_login_redirect_1",
+    expiresAt: new Date("2026-03-01T00:00:00.000Z"),
+  });
+  const { baseUrl } = await harness.start();
+
+  const requestedPath = "/share/share_login_redirect_1?view=compact";
+  const shareResponse = await fetch(`${baseUrl}${requestedPath}`, {
+    redirect: "manual",
+  });
+  assert.equal(shareResponse.status, 303);
+  assert.equal(
+    shareResponse.headers.get("location"),
+    "/login?next=%2Fshare%2Fshare_login_redirect_1%3Fview%3Dcompact",
+  );
+
+  const loginResponse = await fetch(`${baseUrl}/api/auth/login`, {
+    method: "POST",
+    redirect: "manual",
+    headers: {
+      Origin: SITE_ORIGIN,
+    },
+    body: new URLSearchParams({
+      email: "member@example.com",
+      password: "member-password",
+      next: requestedPath,
+    }),
+  });
+
+  assert.equal(loginResponse.status, 303);
+  assert.equal(loginResponse.headers.get("location"), requestedPath);
+});
+
+test("authenticated /share/<token> returns placeholder for valid token", async () => {
+  const harness = createHarness();
+  const { cookie } = seedAuthenticatedSession(harness, {
+    email: "member@example.com",
+  });
+  const { baseUrl } = await harness.start();
+  harness.reportShareRepository.seedShare({
+    reportRef: "report_abc_123",
+    tokenHash: "hash:share_valid_1",
+    expiresAt: new Date("2026-03-01T00:00:00.000Z"),
+  });
+
+  const response = await fetch(`${baseUrl}/share/share_valid_1`, {
+    headers: {
+      Cookie: cookie,
+    },
+  });
+
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /Shared report placeholder/);
+  assert.match(html, /report_abc_123/);
+});
+
+test("authenticated /share/<token> returns 410 for revoked token", async () => {
+  const harness = createHarness();
+  const { cookie } = seedAuthenticatedSession(harness, {
+    email: "member@example.com",
+  });
+  const { baseUrl } = await harness.start();
+  harness.reportShareRepository.seedShare({
+    reportRef: "report_revoked_1",
+    tokenHash: "hash:share_revoked_1",
+    revokedAt: new Date("2026-02-27T09:00:00.000Z"),
+    expiresAt: new Date("2026-03-01T00:00:00.000Z"),
+  });
+
+  const response = await fetch(`${baseUrl}/share/share_revoked_1`, {
+    headers: {
+      Cookie: cookie,
+    },
+  });
+
+  assert.equal(response.status, 410);
+});
+
+test("authenticated /share/<token> returns 404 for invalid token", async () => {
+  const harness = createHarness();
+  const { cookie } = seedAuthenticatedSession(harness, {
+    email: "member@example.com",
+  });
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/share/share_missing_1`, {
+    headers: {
+      Cookie: cookie,
+    },
+  });
+
+  assert.equal(response.status, 404);
+});
+
+test("authenticated /share/<token> returns 404 for expired token", async () => {
+  const harness = createHarness();
+  const { cookie } = seedAuthenticatedSession(harness, {
+    email: "member@example.com",
+  });
+  harness.setShareNow(new Date("2026-02-27T10:00:00.000Z"));
+  const { baseUrl } = await harness.start();
+  harness.reportShareRepository.seedShare({
+    reportRef: "report_expired_1",
+    tokenHash: "hash:share_expired_1",
+    expiresAt: new Date("2026-02-27T09:00:00.000Z"),
+  });
+
+  const response = await fetch(`${baseUrl}/share/share_expired_1`, {
+    headers: {
+      Cookie: cookie,
+    },
+  });
+
+  assert.equal(response.status, 404);
+});
+
+test("access request success creates row with status new", async () => {
+  const harness = createHarness();
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/access-requests`, {
+    method: "POST",
+    headers: {
+      Origin: SITE_ORIGIN,
+    },
+    body: makeAccessRequestBody({
+      email: "Lead@Example.com",
+      name: "  Ada Lovelace ",
+      company: "  Analytical Engines Inc ",
+      note: "  Please contact me about early access. ",
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    ok: true,
+    message: "Request received. If access is approved, we will contact you by email.",
+  });
+
+  assert.equal(harness.accessRequestRepository.requests.length, 1);
+  assert.deepEqual(harness.accessRequestRepository.requests[0], {
+    id: "ar_1",
+    email: "lead@example.com",
+    fullName: "Ada Lovelace",
+    company: "Analytical Engines Inc",
+    message: "Please contact me about early access.",
+    status: "new",
+    handledByUserId: null,
+    handledAt: null,
+    createdAt: harness.accessRequestRepository.requests[0]?.createdAt,
+  });
+});
+
+test("access request invalid email is rejected", async () => {
+  const harness = createHarness();
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/access-requests`, {
+    method: "POST",
+    headers: {
+      Origin: SITE_ORIGIN,
+    },
+    body: makeAccessRequestBody({
+      email: "not-an-email",
+      name: "User",
+    }),
+  });
+
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), {
+    ok: false,
+    error: "invalid_email",
+  });
+  assert.equal(harness.accessRequestRepository.requests.length, 0);
+});
+
+test("honeypot-filled access request returns generic success and creates no row", async () => {
+  const harness = createHarness();
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/access-requests`, {
+    method: "POST",
+    headers: { Origin: SITE_ORIGIN },
+    body: makeAccessRequestBody({
+      email: "bot@example.com",
+      website: "https://spam.example",
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    ok: true,
+    message: "Request received. If access is approved, we will contact you by email.",
+  });
+  assert.equal(harness.accessRequestRepository.requests.length, 0);
+});
+
+test("time gate under 3s returns generic success and creates no row", async () => {
+  const harness = createHarness();
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/access-requests`, {
+    method: "POST",
+    headers: { Origin: SITE_ORIGIN },
+    body: new URLSearchParams({
+      email: "speedy@example.com",
+      website: "",
+      client_ts: String(Date.now()),
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    ok: true,
+    message: "Request received. If access is approved, we will contact you by email.",
+  });
+  assert.equal(harness.accessRequestRepository.requests.length, 0);
+});
+
+test("duplicate access request within 24h returns generic success and creates no new row", async () => {
+  const harness = createHarness();
+  const { baseUrl } = await harness.start();
+
+  const first = await fetch(`${baseUrl}/api/access-requests`, {
+    method: "POST",
+    headers: { Origin: SITE_ORIGIN },
+    body: makeAccessRequestBody({
+      email: "repeat@example.com",
+      name: "First",
+    }),
+  });
+  assert.equal(first.status, 200);
+  assert.equal(harness.accessRequestRepository.requests.length, 1);
+
+  const second = await fetch(`${baseUrl}/api/access-requests`, {
+    method: "POST",
+    headers: { Origin: SITE_ORIGIN },
+    body: makeAccessRequestBody({
+      email: "repeat@example.com",
+      name: "Second",
+    }),
+  });
+
+  assert.equal(second.status, 200);
+  assert.deepEqual(await second.json(), {
+    ok: true,
+    message: "Request received. If access is approved, we will contact you by email.",
+  });
+  assert.equal(harness.accessRequestRepository.requests.length, 1);
+});
+
+test("rate limit exceeded returns 429 and creates no additional row", async () => {
+  const harness = createHarness();
+  const { baseUrl } = await harness.start();
+
+  for (let i = 0; i < ACCESS_REQUEST_LIMITS.ipPerHour; i += 1) {
+    const response = await fetch(`${baseUrl}/api/access-requests`, {
+      method: "POST",
+      headers: {
+        Origin: SITE_ORIGIN,
+        "X-Forwarded-For": "198.51.100.10, 203.0.113.99",
+      },
+      body: makeAccessRequestBody({
+        email: `lead-${i}@example.com`,
+      }),
+    });
+    assert.equal(response.status, 200);
+  }
+
+  assert.equal(harness.accessRequestRepository.requests.length, ACCESS_REQUEST_LIMITS.ipPerHour);
+
+  const blocked = await fetch(`${baseUrl}/api/access-requests`, {
+    method: "POST",
+    headers: {
+      Origin: SITE_ORIGIN,
+      "X-Forwarded-For": "198.51.100.10, 203.0.113.99",
+    },
+    body: makeAccessRequestBody({
+      email: "lead-blocked@example.com",
+    }),
+  });
+
+  assert.equal(blocked.status, 429);
+  assert.deepEqual(await blocked.json(), {
+    ok: false,
+    message: "Unable to submit right now. Please try again later.",
+  });
+  assert.equal(harness.accessRequestRepository.requests.length, ACCESS_REQUEST_LIMITS.ipPerHour);
+});
+
+test("old rate-limit buckets are ignored for current request evaluation", async () => {
+  const harness = createHarness();
+  const { baseUrl } = await harness.start();
+  const oldBucket = new Date(Date.now() - 2 * 60 * 60 * 1_000);
+  harness.accessRequestRepository.seedRateLimitBucket({
+    scope: "ip",
+    subjectHash: "hash:198.51.100.20",
+    bucketStart: startOfHour(oldBucket),
+    hitCount: ACCESS_REQUEST_LIMITS.ipPerHour + 5,
+  });
+
+  const response = await fetch(`${baseUrl}/api/access-requests`, {
+    method: "POST",
+    headers: {
+      Origin: SITE_ORIGIN,
+      "X-Forwarded-For": "198.51.100.20",
+    },
+    body: makeAccessRequestBody({
+      email: "fresh@example.com",
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(harness.accessRequestRepository.requests.length, 1);
+});

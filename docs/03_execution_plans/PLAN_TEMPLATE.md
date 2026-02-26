@@ -15,6 +15,19 @@
 - Технические и продуктовые допущения
 - Ссылки на ADR / research notes / внешнюю документацию
 
+## Test-first plan
+
+- List of tests to add/update before implementation.
+- For each test: what contract it asserts + expected status codes/side effects.
+- Negative cases checklist:
+  - [ ] authz (`401/403`)
+  - [ ] validation (`400`)
+  - [ ] not found (`404`)
+  - [ ] revoked/expired (`410`)
+  - [ ] rate limit (`429`)
+- Acceptance criteria -> tests mapping:
+  - `<criterion>` -> `<test name(s)>`
+
 ## Steps (PR-sized)
 
 1. Step name

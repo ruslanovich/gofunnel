@@ -14,6 +14,13 @@
 
 Код до шагов 1-5 не пишем (кроме harness-уровня изменений в документации/шаблонах/индексах).
 
+## Recommended loop (test-first)
+
+1. Write failing tests (or at least explicit assertions of expected behavior/contract).
+2. Implement minimal code to make tests pass.
+3. Refactor with tests green.
+4. Update docs/index if public contract changed.
+
 ## Что считать исследованием
 
 ### 1. Local research (обязательно)
