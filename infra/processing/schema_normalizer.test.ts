@@ -56,6 +56,19 @@ test("normalizer does not mutate scalar types/enums", () => {
   assert.deepEqual(riskLevel.enum, ["low", "medium", "high"]);
 });
 
+test("normalizer applies required-all-keys rule to prompt.txt schema (v2)", () => {
+  const normalized = normalizeForStructuredOutputsStrict(readReportSchema("v2"));
+  const root = asObjectRecord(normalized, "$root");
+  const defs = asObjectRecord(root.$defs, "$.$defs");
+  const evidence = asObjectRecord(defs.Evidence, "$.$defs.Evidence");
+  const required = toStringArray(evidence.required);
+
+  assert.deepEqual(
+    [...required].sort(),
+    ["quote", "timecode", "loc", "source_id"].sort(),
+  );
+});
+
 function collectObjectSchemaNodes(
   schema: unknown,
 ): Array<{ path: string; node: { properties?: Record<string, unknown>; required?: unknown; additionalProperties?: unknown } }> {
@@ -169,7 +182,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function readReportSchemaV1(): unknown {
+  return readReportSchema("v1");
+}
+
+function readReportSchema(version: string): unknown {
   const root = fileURLToPath(new URL("../../", import.meta.url));
-  const schemaPath = path.join(root, "schemas", "report", "v1.json");
+  const schemaPath = path.join(root, "schemas", "report", `${version}.json`);
   return JSON.parse(readFileSync(schemaPath, "utf8")) as unknown;
 }

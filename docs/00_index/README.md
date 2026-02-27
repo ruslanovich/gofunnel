@@ -36,6 +36,7 @@
 - Epic 3 PR-3.1 execution plan: `docs/03_execution_plans/2026-02-27_pr-3-1-llm-adapter-ajv-validation.md`
 - Epic 3 PR-3.1b execution plan (OpenAI provider default): `docs/03_execution_plans/2026-02-27_pr-3-1b-openai-provider-gpt5mini.md`
 - Epic 3 PR-3.1c execution plan (Structured Outputs schema normalizer): `docs/03_execution_plans/2026-02-27_pr-3-1c-structured-outputs-schema-normalizer.md`
+- Epic 3 PR-3.1d execution plan (use prompt.txt instruction + schema): `docs/03_execution_plans/2026-02-27_pr-3-1d-use-prompt-txt-contract.md`
 - Epic 3 PR-3.2 execution plan: `docs/03_execution_plans/2026-02-27_pr-3-2-worker-pipeline-s3-llm-validate-s3-db.md`
 - Epic 3 PR-3.3 execution plan: `docs/03_execution_plans/2026-02-27_pr-3-3-get-report-endpoint.md`
 - DX CI node dependency install plan: `docs/03_execution_plans/2026-02-27_pr-dx-ci-node-deps-install.md`

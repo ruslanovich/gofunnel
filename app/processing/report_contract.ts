@@ -1,5 +1,5 @@
-export const ACTIVE_REPORT_PROMPT_VERSION = "v1";
-export const ACTIVE_REPORT_SCHEMA_VERSION = "v1";
+export const ACTIVE_REPORT_PROMPT_VERSION = "v2";
+export const ACTIVE_REPORT_SCHEMA_VERSION = "v2";
 
 export type ReportContractVersions = {
   promptVersion: string;

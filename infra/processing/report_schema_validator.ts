@@ -2,7 +2,8 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { Ajv, type AnySchema, type ErrorObject, type ValidateFunction } from "ajv";
+import { type AnySchema, type ErrorObject, type ValidateFunction } from "ajv";
+import { Ajv2020 } from "ajv/dist/2020.js";
 
 import { resolveReportContractVersions } from "../../app/processing/report_contract.js";
 
@@ -11,8 +12,10 @@ const MAX_ERROR_SUMMARY_LENGTH = 280;
 
 const REPORT_SCHEMA_DIR = path.join(resolveRepositoryRootDir(), "schemas", "report");
 
-const ajv = new Ajv({
+const ajv = new Ajv2020({
   strict: true,
+  strictRequired: false,
+  strictTypes: false,
   allErrors: true,
   allowUnionTypes: false,
   coerceTypes: false,

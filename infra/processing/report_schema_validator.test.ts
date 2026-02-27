@@ -30,6 +30,16 @@ test("invalid report fixture fails with schema_validation_failed and concise sum
   }
 });
 
+test("v2 prompt contract schema loads and validates payload shape", () => {
+  const result = validateReportPayload({}, { schemaVersion: "v2" });
+
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.errorCode, "schema_validation_failed");
+    assert.equal(result.schemaVersion, "v2");
+  }
+});
+
 function readFixtureJson(filename: string): unknown {
   const dir = path.dirname(fileURLToPath(import.meta.url));
   const fixturePath = path.join(dir, "fixtures", "report", filename);

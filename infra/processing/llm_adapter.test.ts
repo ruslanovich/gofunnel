@@ -42,9 +42,9 @@ test("analyzeTranscript returns rawText and parsedJson using default prompt/sche
   });
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0]?.promptVersion, "v1");
-  assert.equal(calls[0]?.schemaVersion, "v1");
-  assert.match(calls[0]?.promptText ?? "", /report\/v1/i);
+  assert.equal(calls[0]?.promptVersion, "v2");
+  assert.equal(calls[0]?.schemaVersion, "v2");
+  assert.match(calls[0]?.promptText ?? "", /Structured Output JSON schema/i);
   assert.equal(result.rawText, JSON.stringify({ overview: "ok" }));
   assert.deepEqual(result.parsedJson, { overview: "ok" });
 });
@@ -236,7 +236,7 @@ test("openai provider analyze uses structured output request and returns parsed 
     transcriptText: "hello transcript",
     promptText: "return json only",
     promptVersion: "v1",
-    schemaVersion: "v1",
+    schemaVersion: "v2",
     model: "gpt-5-mini",
     apiKey: "test-api-key",
     timeoutMs: 2000,
@@ -255,21 +255,21 @@ test("openai provider analyze uses structured output request and returns parsed 
     };
   };
   assert.equal(structuredRequest.text?.format?.type, "json_schema");
-  assert.equal(structuredRequest.text?.format?.name, "report_v1");
+  assert.equal(structuredRequest.text?.format?.name, "report_v2");
   assert.equal(structuredRequest.text?.format?.strict, true);
   assert.ok(structuredRequest.text?.format?.schema);
   const schema = structuredRequest.text?.format?.schema as {
-    properties?: {
-      nextSteps?: {
-        items?: {
-          required?: unknown;
-        };
+    $defs?: {
+      Evidence?: {
+        required?: unknown;
       };
     };
   };
-  const nextStepsRequired = schema.properties?.nextSteps?.items?.required;
-  assert.ok(Array.isArray(nextStepsRequired));
-  assert.ok(nextStepsRequired.includes("dueDate"));
+  const evidenceRequired = schema.$defs?.Evidence?.required;
+  assert.ok(Array.isArray(evidenceRequired));
+  assert.ok(evidenceRequired.includes("timecode"));
+  assert.ok(evidenceRequired.includes("loc"));
+  assert.ok(evidenceRequired.includes("source_id"));
   assert.equal(structuredRequest.text?.format?.json_schema, undefined);
   assert.equal(result.rawText, "{\"overview\":\"ok\"}");
   assert.deepEqual(result.parsedJson, { overview: "ok" });
