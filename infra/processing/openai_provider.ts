@@ -10,6 +10,7 @@ import type {
   ProviderAnalyzeInput,
   ProviderAnalyzeResult,
 } from "./llm_adapter.js";
+import { normalizeForStructuredOutputsStrict } from "./schema_normalizer.js";
 
 type OpenAiClientLike = {
   responses: {
@@ -234,8 +235,14 @@ function loadReportSchema(schemaVersion: string): Record<string, unknown> {
   }
 
   const schema = parsed as Record<string, unknown>;
-  schemaCache.set(schemaVersion, schema);
-  return schema;
+  const normalizedSchema = normalizeForStructuredOutputsStrict(schema);
+  if (typeof normalizedSchema !== "object" || normalizedSchema === null || Array.isArray(normalizedSchema)) {
+    throw new Error(`Report schema "${schemaVersion}" normalized into a non-object`);
+  }
+
+  const normalizedObjectSchema = normalizedSchema as Record<string, unknown>;
+  schemaCache.set(schemaVersion, normalizedObjectSchema);
+  return normalizedObjectSchema;
 }
 
 function parseJsonSafe(rawText: string): unknown | undefined {

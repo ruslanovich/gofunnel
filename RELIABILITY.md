@@ -172,6 +172,8 @@
   - unclassified provider failures normalize to `llm_provider_failed` (`retriable=false`)
 - Added OpenAI provider integration (official Node SDK) with JSON-schema-first output mode:
   - Structured Outputs path uses `json_schema` response format (`strict=true`) to keep output schema-aligned.
+  - Before sending schema to OpenAI, runtime normalizes object nodes for strict compatibility: every key in `properties` is included in `required`, and missing `additionalProperties` defaults to `false`.
+  - For strict mode, optional semantics must be expressed as nullable types in schema (for example `type: [\"string\", \"null\"]`), while the key remains present in `required`.
   - Fallback path forces JSON-only mode (`json_object`) if structured mode is unavailable.
   - SDK auto-retries are disabled (`maxRetries=0`) so outer worker retries/backoff remain the single source of retry policy (ADR-0010).
   - retriable mapping: timeout, network, HTTP `429`, HTTP `5xx`.
