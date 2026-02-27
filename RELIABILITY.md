@@ -56,3 +56,32 @@
   - dropped (`honeypot`, `time_gate`)
   - rejected (`rate_limited_ip`, `rate_limited_email`)
 - Метрики backend-пайплайна пока не подключены; текущие stable reason codes специально пригодны как будущие labels/counters.
+
+## Epic 2 PR-1.1 implementation notes (files schema only)
+
+- Added migration pair:
+  - `infra/db/migrations/0003_files_table.up.sql`
+  - `infra/db/migrations/0003_files_table.down.sql`
+- Added `files` table indexes for target read paths:
+  - `(user_id, created_at DESC, id DESC)` for deterministic owner list order
+  - `(user_id, id)` for owner-scoped single-row lookup
+- Added automated migration smoke test harness:
+  - `infra/db/migrator.smoke.test.ts` exercises `up -> status -> down` for the new migration
+  - test runs via `scripts/test.sh`; it skips when `DATABASE_URL` is not set (to keep CI/local runs deterministic without forcing DB provisioning).
+
+## Epic 2 PR-3.1 implementation notes (upload endpoint only)
+
+- Added `POST /api/files/upload` in current Node HTTP transport with multipart parsing and fixed max-size guard (`10MB`).
+- Upload path uses two durable backends:
+  - Postgres `files` metadata row lifecycle (`processing` -> `uploaded` or `failed`)
+  - S3 object write/delete through the server-side storage adapter
+- Compensation paths implemented for partial-failure safety:
+  - S3 success + DB finalize failure:
+    - server performs immediate best-effort `deleteObject(key)` rollback
+    - if delete also fails, emits structured `orphan_s3_object` log for operational cleanup visibility
+  - DB row created + S3 put failure:
+    - server updates that row to `status='failed'` with `error_code='s3_put_failed'` and sanitized message
+- Automated coverage added for critical reliability edges:
+  - happy path metadata/object consistency
+  - invalid extension and oversize short-circuit behavior (no side effects)
+  - both compensation directions including orphan logging branch.

@@ -25,6 +25,18 @@ import type {
   PersistInviteForAdminOutcome,
 } from "../../app/invites/contracts.js";
 import { INVITE_TTL_MS, InviteService } from "../../app/invites/service.js";
+import type {
+  CreateProcessingFileInput,
+  FileMetadataRepository,
+  FileObjectStorage,
+  FileRecord,
+} from "../../app/files/contracts.js";
+import {
+  FILE_UPLOAD_MAX_BYTES,
+  FileDetailsService,
+  FileListService,
+  FileUploadService,
+} from "../../app/files/service.js";
 import type { ReportShareRepository, StoredReportShare } from "../../app/shares/contracts.js";
 import { ReportShareService } from "../../app/shares/service.js";
 import type {
@@ -572,6 +584,182 @@ class InMemoryReportShareRepository implements ReportShareRepository {
   }
 }
 
+class InMemoryFileRepository implements FileMetadataRepository {
+  rows: Array<FileRecord & { createdAt: Date; updatedAt: Date }> = [];
+  failCreateProcessingOnce: Error | null = null;
+  failMarkUploadedOnce: Error | null = null;
+  failMarkFailedOnce: Error | null = null;
+
+  async createProcessingFile(input: CreateProcessingFileInput): Promise<void> {
+    if (this.failCreateProcessingOnce) {
+      const error = this.failCreateProcessingOnce;
+      this.failCreateProcessingOnce = null;
+      throw error;
+    }
+
+    this.rows.push({
+      ...input,
+      status: "processing",
+      errorCode: null,
+      errorMessage: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+  }
+
+  async markFileUploaded(input: { id: string; userId: string }): Promise<void> {
+    if (this.failMarkUploadedOnce) {
+      const error = this.failMarkUploadedOnce;
+      this.failMarkUploadedOnce = null;
+      throw error;
+    }
+
+    const row = this.rows.find((candidate) => candidate.id === input.id && candidate.userId === input.userId);
+    assert.ok(row, `expected file row ${input.id} to exist`);
+    row.status = "uploaded";
+    row.errorCode = null;
+    row.errorMessage = null;
+    row.updatedAt = new Date();
+  }
+
+  async markFileFailed(input: {
+    id: string;
+    userId: string;
+    errorCode: string;
+    errorMessage: string;
+  }): Promise<void> {
+    if (this.failMarkFailedOnce) {
+      const error = this.failMarkFailedOnce;
+      this.failMarkFailedOnce = null;
+      throw error;
+    }
+
+    const row = this.rows.find((candidate) => candidate.id === input.id && candidate.userId === input.userId);
+    assert.ok(row, `expected file row ${input.id} to exist`);
+    row.status = "failed";
+    row.errorCode = input.errorCode;
+    row.errorMessage = input.errorMessage;
+    row.updatedAt = new Date();
+  }
+
+  async listFilesForUser(input: {
+    userId: string;
+    limit: number;
+    cursor: { createdAt: Date; id: string } | null;
+  }): Promise<
+    Array<{
+      id: string;
+      originalFilename: string;
+      extension: "txt" | "vtt";
+      sizeBytes: number;
+      status: "queued" | "processing" | "uploaded" | "succeeded" | "failed";
+      createdAt: Date;
+      updatedAt: Date;
+    }>
+  > {
+    const filtered = this.rows
+      .filter((row) => row.userId === input.userId)
+      .sort((a, b) => {
+        const createdDiff = b.createdAt.getTime() - a.createdAt.getTime();
+        if (createdDiff !== 0) {
+          return createdDiff;
+        }
+        return b.id.localeCompare(a.id);
+      })
+      .filter((row) => {
+        if (!input.cursor) {
+          return true;
+        }
+
+        const rowMs = row.createdAt.getTime();
+        const cursorMs = input.cursor.createdAt.getTime();
+        if (rowMs < cursorMs) {
+          return true;
+        }
+        if (rowMs > cursorMs) {
+          return false;
+        }
+        return row.id.localeCompare(input.cursor.id) < 0;
+      })
+      .slice(0, input.limit);
+
+    return filtered.map((row) => ({
+      id: row.id,
+      originalFilename: row.originalFilename,
+      extension: row.extension,
+      sizeBytes: row.sizeBytes,
+      status: row.status,
+      createdAt: new Date(row.createdAt),
+      updatedAt: new Date(row.updatedAt),
+    }));
+  }
+
+  async findFileForUser(input: {
+    id: string;
+    userId: string;
+  }): Promise<{
+    id: string;
+    originalFilename: string;
+    extension: "txt" | "vtt";
+    sizeBytes: number;
+    status: "queued" | "processing" | "uploaded" | "succeeded" | "failed";
+    createdAt: Date;
+    updatedAt: Date;
+    errorCode: string | null;
+    errorMessage: string | null;
+  } | null> {
+    const row = this.rows.find((candidate) => candidate.id === input.id && candidate.userId === input.userId);
+    if (!row) {
+      return null;
+    }
+
+    return {
+      id: row.id,
+      originalFilename: row.originalFilename,
+      extension: row.extension,
+      sizeBytes: row.sizeBytes,
+      status: row.status,
+      createdAt: new Date(row.createdAt),
+      updatedAt: new Date(row.updatedAt),
+      errorCode: row.errorCode,
+      errorMessage: row.errorMessage,
+    };
+  }
+}
+
+type PutObjectCall = {
+  key: string;
+  body: Buffer;
+  contentType: string;
+};
+
+class InMemoryFileStorage implements FileObjectStorage {
+  putCalls: PutObjectCall[] = [];
+  deleteCalls: string[] = [];
+  failPutOnce: Error | null = null;
+  failDeleteOnce: Error | null = null;
+
+  async putObject(key: string, body: Buffer, contentType: string): Promise<void> {
+    this.putCalls.push({ key, body, contentType });
+
+    if (this.failPutOnce) {
+      const error = this.failPutOnce;
+      this.failPutOnce = null;
+      throw error;
+    }
+  }
+
+  async deleteObject(key: string): Promise<void> {
+    this.deleteCalls.push(key);
+
+    if (this.failDeleteOnce) {
+      const error = this.failDeleteOnce;
+      this.failDeleteOnce = null;
+      throw error;
+    }
+  }
+}
+
 const openServers = new Set<import("node:http").Server>();
 
 afterEach(async () => {
@@ -597,8 +785,12 @@ function createHarness() {
   const accessRequestRepository = new InMemoryAccessRequestRepository();
   const inviteRepository = new InMemoryInviteRepository(repository, accessRequestRepository);
   const reportShareRepository = new InMemoryReportShareRepository();
+  const fileRepository = new InMemoryFileRepository();
+  const fileStorage = new InMemoryFileStorage();
+  const fileLogs: Array<Record<string, unknown>> = [];
   let tokenCounter = 0;
   let inviteTokenCounter = 0;
+  let fileIdCounter = 0;
   let inviteNow = new Date("2026-02-26T12:00:00.000Z");
   let shareNow = new Date("2026-02-27T10:00:00.000Z");
   const authService = new AuthService({
@@ -627,6 +819,21 @@ function createHarness() {
     hashToken: (token) => `hash:${token}`,
     now: () => new Date(shareNow),
   });
+  const fileUploadService = new FileUploadService({
+    repository: fileRepository,
+    storage: fileStorage,
+    storageBucket: "gofunnel-test-bucket",
+    randomId: () => testUuid(++fileIdCounter),
+    logEvent: (event, fields) => {
+      fileLogs.push({ event, ...fields });
+    },
+  });
+  const fileListService = new FileListService({
+    repository: fileRepository,
+  });
+  const fileDetailsService = new FileDetailsService({
+    repository: fileRepository,
+  });
 
   const server = createAuthHttpServer({
     authService,
@@ -634,6 +841,9 @@ function createHarness() {
     adminUserService,
     inviteService,
     reportShareService,
+    fileUploadService,
+    fileListService,
+    fileDetailsService,
     siteOrigin: SITE_ORIGIN,
     secureCookies: false,
   });
@@ -644,6 +854,9 @@ function createHarness() {
     accessRequestRepository,
     inviteRepository,
     reportShareRepository,
+    fileRepository,
+    fileStorage,
+    fileLogs,
     authService,
     adminUserService,
     setInviteNow(value: Date) {
@@ -697,6 +910,34 @@ function makeAccessRequestBody(overrides: Record<string, string>): URLSearchPara
   });
 }
 
+function makeMultipartUploadBody(input: {
+  filename: string;
+  content: Buffer | string;
+  fieldName?: string;
+  contentType?: string;
+  boundary?: string;
+}): { body: Buffer; contentType: string } {
+  const fieldName = input.fieldName ?? "file";
+  const partContentType = input.contentType ?? "text/plain";
+  const boundary = input.boundary ?? "----gofunnel-upload-test-boundary";
+  const contentBuffer = Buffer.isBuffer(input.content) ? input.content : Buffer.from(input.content, "utf8");
+  const header =
+    `--${boundary}\r\n` +
+    `Content-Disposition: form-data; name="${fieldName}"; filename="${input.filename}"\r\n` +
+    `Content-Type: ${partContentType}\r\n\r\n`;
+  const footer = `\r\n--${boundary}--\r\n`;
+
+  return {
+    body: Buffer.concat([Buffer.from(header, "utf8"), contentBuffer, Buffer.from(footer, "utf8")]),
+    contentType: `multipart/form-data; boundary=${boundary}`,
+  };
+}
+
+function testUuid(counter: number): string {
+  const suffix = counter.toString(16).padStart(12, "0");
+  return `00000000-0000-4000-8000-${suffix}`;
+}
+
 function seedAuthenticatedSession(
   harness: ReturnType<typeof createHarness>,
   userOverrides: Partial<StoredUserForLogin> = {},
@@ -722,6 +963,40 @@ function seedAuthenticatedSession(
   });
 
   return { user, cookie: makeCookieValue(opaqueToken) };
+}
+
+function seedUploadedFileRow(
+  harness: ReturnType<typeof createHarness>,
+  input: {
+    id: string;
+    userId: string;
+    originalFilename: string;
+    extension: "txt" | "vtt";
+    sizeBytes: number;
+    createdAt: Date;
+    updatedAt?: Date;
+    status?: "uploaded" | "processing" | "failed";
+    errorCode?: string | null;
+    errorMessage?: string | null;
+  },
+): void {
+  const createdAt = new Date(input.createdAt);
+  const status = input.status ?? "uploaded";
+  harness.fileRepository.rows.push({
+    id: input.id,
+    userId: input.userId,
+    storageBucket: "gofunnel-test-bucket",
+    storageKeyOriginal: `users/${input.userId}/files/${input.id}/original.${input.extension}`,
+    originalFilename: input.originalFilename,
+    extension: input.extension,
+    mimeType: input.extension === "vtt" ? "text/vtt" : "text/plain",
+    sizeBytes: input.sizeBytes,
+    status,
+    errorCode: input.errorCode ?? null,
+    errorMessage: input.errorMessage ?? null,
+    createdAt,
+    updatedAt: input.updatedAt ? new Date(input.updatedAt) : createdAt,
+  });
 }
 
 function startOfHour(value: Date): Date {
@@ -851,6 +1126,31 @@ test("expired session rejected for /app", async () => {
   assert.equal(response.status, 303);
   assert.equal(response.headers.get("location"), "/login?next=%2Fapp");
   assert.equal(harness.repository.lastSeenTouches, 0);
+});
+
+test("authenticated /app renders files dashboard UI scaffold", async () => {
+  const harness = createHarness();
+  const { cookie } = seedAuthenticatedSession(harness, {
+    email: "member@example.com",
+  });
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/app`, {
+    headers: {
+      Cookie: cookie,
+    },
+  });
+
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /Files dashboard/);
+  assert.match(html, /id="app-upload-form"/);
+  assert.match(html, /id="app-upload-input"/);
+  assert.match(html, /accept="\.txt,\s*\.vtt"/);
+  assert.match(html, /id="app-files-table"/);
+  assert.match(html, /Report not available yet \(Epic 3\)/);
+  assert.match(html, /\/api\/files\/upload/);
+  assert.match(html, /\/api\/files\?limit=20/);
 });
 
 test("non-admin blocked from /admin/*", async () => {
@@ -2125,4 +2425,538 @@ test("old rate-limit buckets are ignored for current request evaluation", async 
 
   assert.equal(response.status, 200);
   assert.equal(harness.accessRequestRepository.requests.length, 1);
+});
+
+test("files list endpoint requires authenticated session", async () => {
+  const harness = createHarness();
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/files`);
+
+  assert.equal(response.status, 401);
+  assert.equal(await response.text(), "auth_required");
+});
+
+test("files list returns only current user items and omits storage internals", async () => {
+  const harness = createHarness();
+  const { user: owner, cookie } = seedAuthenticatedSession(harness, {
+    id: "11111111-1111-4111-8111-111111111111",
+    email: "owner@example.com",
+  });
+  const otherUser = seedUser({
+    id: "22222222-2222-4222-8222-222222222222",
+    email: "other@example.com",
+    role: "user",
+    status: "active",
+  });
+  harness.repository.seedUser(otherUser);
+
+  seedUploadedFileRow(harness, {
+    id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+    userId: owner.id,
+    originalFilename: "owner-new.txt",
+    extension: "txt",
+    sizeBytes: 111,
+    createdAt: new Date("2026-02-27T12:00:00.000Z"),
+  });
+  seedUploadedFileRow(harness, {
+    id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1",
+    userId: otherUser.id,
+    originalFilename: "other.vtt",
+    extension: "vtt",
+    sizeBytes: 222,
+    createdAt: new Date("2026-02-27T11:00:00.000Z"),
+  });
+  seedUploadedFileRow(harness, {
+    id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa0",
+    userId: owner.id,
+    originalFilename: "owner-old.vtt",
+    extension: "vtt",
+    sizeBytes: 333,
+    createdAt: new Date("2026-02-27T10:00:00.000Z"),
+  });
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/files`, {
+    headers: {
+      Cookie: cookie,
+    },
+  });
+
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as {
+    items: Array<Record<string, unknown>>;
+    next_cursor: string | null;
+  };
+  assert.equal(payload.next_cursor, null);
+  assert.equal(payload.items.length, 2);
+  assert.deepEqual(
+    payload.items.map((item) => item.id),
+    [
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa0",
+    ],
+  );
+  assert.equal(payload.items[0]?.original_filename, "owner-new.txt");
+  assert.equal(payload.items[0]?.storage_key_original, undefined);
+  assert.equal(payload.items[0]?.storage_bucket, undefined);
+});
+
+test("files list pagination traverses two pages with stable ordering", async () => {
+  const harness = createHarness();
+  const { user: owner, cookie } = seedAuthenticatedSession(harness, {
+    id: "11111111-1111-4111-8111-111111111111",
+  });
+
+  seedUploadedFileRow(harness, {
+    id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+    userId: owner.id,
+    originalFilename: "first.txt",
+    extension: "txt",
+    sizeBytes: 100,
+    createdAt: new Date("2026-02-27T12:00:00.000Z"),
+  });
+  seedUploadedFileRow(harness, {
+    id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa0",
+    userId: owner.id,
+    originalFilename: "second.vtt",
+    extension: "vtt",
+    sizeBytes: 200,
+    createdAt: new Date("2026-02-27T12:00:00.000Z"),
+  });
+  seedUploadedFileRow(harness, {
+    id: "99999999-9999-4999-8999-999999999999",
+    userId: owner.id,
+    originalFilename: "third.txt",
+    extension: "txt",
+    sizeBytes: 300,
+    createdAt: new Date("2026-02-27T11:00:00.000Z"),
+  });
+  const { baseUrl } = await harness.start();
+
+  const page1 = await fetch(`${baseUrl}/api/files?limit=2`, {
+    headers: {
+      Cookie: cookie,
+    },
+  });
+  assert.equal(page1.status, 200);
+  const page1Payload = (await page1.json()) as {
+    items: Array<Record<string, unknown>>;
+    next_cursor: string | null;
+  };
+  assert.deepEqual(
+    page1Payload.items.map((item) => item.id),
+    [
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa0",
+    ],
+  );
+  assert.ok(page1Payload.next_cursor);
+
+  const page2 = await fetch(
+    `${baseUrl}/api/files?limit=2&cursor=${encodeURIComponent(page1Payload.next_cursor ?? "")}`,
+    {
+      headers: {
+        Cookie: cookie,
+      },
+    },
+  );
+  assert.equal(page2.status, 200);
+  const page2Payload = (await page2.json()) as {
+    items: Array<Record<string, unknown>>;
+    next_cursor: string | null;
+  };
+  assert.deepEqual(page2Payload.items.map((item) => item.id), [
+    "99999999-9999-4999-8999-999999999999",
+  ]);
+  assert.equal(page2Payload.next_cursor, null);
+});
+
+test("files list invalid cursor returns 400 invalid_cursor", async () => {
+  const harness = createHarness();
+  const { cookie } = seedAuthenticatedSession(harness, {
+    id: "11111111-1111-4111-8111-111111111111",
+  });
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/files?cursor=not-a-valid-cursor`, {
+    headers: {
+      Cookie: cookie,
+    },
+  });
+
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: "invalid_cursor" });
+});
+
+test("files details endpoint requires authenticated session", async () => {
+  const harness = createHarness();
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/files/11111111-1111-4111-8111-111111111111`);
+
+  assert.equal(response.status, 401);
+  assert.equal(await response.text(), "auth_required");
+});
+
+test("files details invalid id returns 400 invalid_id", async () => {
+  const harness = createHarness();
+  const { cookie } = seedAuthenticatedSession(harness, {
+    id: "11111111-1111-4111-8111-111111111111",
+  });
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/files/not-a-uuid`, {
+    headers: {
+      Cookie: cookie,
+    },
+  });
+
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: "invalid_id" });
+});
+
+test("files details returns 404 when file belongs to another user", async () => {
+  const harness = createHarness();
+  const { user: owner } = seedAuthenticatedSession(harness, {
+    id: "11111111-1111-4111-8111-111111111111",
+    email: "owner@example.com",
+  });
+  const { cookie: otherCookie } = seedAuthenticatedSession(
+    harness,
+    {
+      id: "22222222-2222-4222-8222-222222222222",
+      email: "other@example.com",
+    },
+    "opaque_2",
+  );
+
+  seedUploadedFileRow(harness, {
+    id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+    userId: owner.id,
+    originalFilename: "owner.txt",
+    extension: "txt",
+    sizeBytes: 123,
+    createdAt: new Date("2026-02-27T12:00:00.000Z"),
+  });
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/files/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1`, {
+    headers: {
+      Cookie: otherCookie,
+    },
+  });
+
+  assert.equal(response.status, 404);
+  assert.equal(await response.text(), "Not Found");
+});
+
+test("files details returns owner metadata with expected fields", async () => {
+  const harness = createHarness();
+  const { user: owner, cookie } = seedAuthenticatedSession(harness, {
+    id: "11111111-1111-4111-8111-111111111111",
+    email: "owner@example.com",
+  });
+  const createdAt = new Date("2026-02-27T12:00:00.000Z");
+  const updatedAt = new Date("2026-02-27T12:10:00.000Z");
+  seedUploadedFileRow(harness, {
+    id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+    userId: owner.id,
+    originalFilename: "failed.vtt",
+    extension: "vtt",
+    sizeBytes: 456,
+    status: "failed",
+    errorCode: "transcription_failed",
+    errorMessage: "   vendor\nerror   detail\twith  extra spaces    ",
+    createdAt,
+    updatedAt,
+  });
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/files/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1`, {
+    headers: {
+      Cookie: cookie,
+    },
+  });
+
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as Record<string, unknown>;
+  assert.equal(payload.storage_bucket, undefined);
+  assert.equal(payload.storage_key_original, undefined);
+  assert.deepEqual(payload, {
+    id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+    original_filename: "failed.vtt",
+    extension: "vtt",
+    size_bytes: 456,
+    status: "failed",
+    created_at: createdAt.toISOString(),
+    updated_at: updatedAt.toISOString(),
+    error_code: "transcription_failed",
+    error_message: "vendor error detail with extra spaces",
+  });
+});
+
+test("upload endpoint requires authenticated session", async () => {
+  const harness = createHarness();
+  const { baseUrl } = await harness.start();
+  const multipart = makeMultipartUploadBody({
+    filename: "note.txt",
+    content: "hello",
+  });
+
+  const response = await fetch(`${baseUrl}/api/files/upload`, {
+    method: "POST",
+    headers: {
+      Origin: SITE_ORIGIN,
+      "Content-Type": multipart.contentType,
+    },
+    body: multipart.body.toString("utf8"),
+  });
+
+  assert.equal(response.status, 401);
+  assert.equal(await response.text(), "auth_required");
+  assert.equal(harness.fileRepository.rows.length, 0);
+  assert.equal(harness.fileStorage.putCalls.length, 0);
+});
+
+test("upload .txt success stores metadata and object", async () => {
+  const harness = createHarness();
+  const { user, cookie } = seedAuthenticatedSession(harness, {
+    id: "11111111-1111-4111-8111-111111111111",
+    email: "owner@example.com",
+  });
+  const { baseUrl } = await harness.start();
+  const payload = Buffer.from("hello from txt", "utf8");
+  const multipart = makeMultipartUploadBody({
+    filename: "notes.txt",
+    content: payload,
+    contentType: "text/plain",
+  });
+
+  const response = await fetch(`${baseUrl}/api/files/upload`, {
+    method: "POST",
+    headers: {
+      Origin: SITE_ORIGIN,
+      Cookie: cookie,
+      "Content-Type": multipart.contentType,
+    },
+    body: multipart.body.toString("utf8"),
+  });
+
+  assert.equal(response.status, 200);
+  const json = (await response.json()) as {
+    ok: boolean;
+    file_id: string;
+    status: string;
+  };
+  assert.equal(json.ok, true);
+  assert.match(json.file_id, /^[0-9a-f-]{36}$/);
+  assert.equal(json.status, "uploaded");
+
+  assert.equal(harness.fileRepository.rows.length, 1);
+  const row = harness.fileRepository.rows[0];
+  assert.ok(row);
+  assert.equal(row.id, json.file_id);
+  assert.equal(row.userId, user.id);
+  assert.equal(row.status, "uploaded");
+  assert.equal(row.storageBucket, "gofunnel-test-bucket");
+  assert.equal(row.originalFilename, "notes.txt");
+  assert.equal(row.extension, "txt");
+  assert.equal(row.mimeType, "text/plain");
+  assert.equal(row.sizeBytes, payload.length);
+  assert.equal(
+    row.storageKeyOriginal,
+    `users/${user.id}/files/${json.file_id}/original.txt`,
+  );
+
+  assert.equal(harness.fileStorage.putCalls.length, 1);
+  const putCall = harness.fileStorage.putCalls[0];
+  assert.ok(putCall);
+  assert.equal(putCall.key, row.storageKeyOriginal);
+  assert.equal(putCall.contentType, "text/plain");
+  assert.deepEqual(putCall.body, payload);
+});
+
+test("upload success is visible in files list response", async () => {
+  const harness = createHarness();
+  const { cookie } = seedAuthenticatedSession(harness, {
+    id: "11111111-1111-4111-8111-111111111111",
+    email: "owner@example.com",
+  });
+  const { baseUrl } = await harness.start();
+  const multipart = makeMultipartUploadBody({
+    filename: "visible.txt",
+    content: "visible-content",
+    contentType: "text/plain",
+  });
+
+  const uploadResponse = await fetch(`${baseUrl}/api/files/upload`, {
+    method: "POST",
+    headers: {
+      Origin: SITE_ORIGIN,
+      Cookie: cookie,
+      "Content-Type": multipart.contentType,
+    },
+    body: multipart.body.toString("utf8"),
+  });
+  assert.equal(uploadResponse.status, 200);
+  const uploadPayload = (await uploadResponse.json()) as { file_id: string };
+
+  const listResponse = await fetch(`${baseUrl}/api/files?limit=20`, {
+    headers: {
+      Cookie: cookie,
+    },
+  });
+  assert.equal(listResponse.status, 200);
+  const listPayload = (await listResponse.json()) as {
+    items: Array<Record<string, unknown>>;
+    next_cursor: string | null;
+  };
+
+  assert.equal(listPayload.items.length, 1);
+  assert.deepEqual(listPayload.items[0], {
+    id: uploadPayload.file_id,
+    original_filename: "visible.txt",
+    extension: "txt",
+    size_bytes: Buffer.byteLength("visible-content"),
+    status: "uploaded",
+    created_at: listPayload.items[0]?.created_at,
+    updated_at: listPayload.items[0]?.updated_at,
+  });
+  assert.equal(typeof listPayload.items[0]?.created_at, "string");
+  assert.equal(typeof listPayload.items[0]?.updated_at, "string");
+  assert.equal(listPayload.next_cursor, null);
+});
+
+test("upload rejects unsupported extension without DB or S3 side effects", async () => {
+  const harness = createHarness();
+  const { cookie } = seedAuthenticatedSession(harness, {
+    id: "11111111-1111-4111-8111-111111111111",
+  });
+  const { baseUrl } = await harness.start();
+  const multipart = makeMultipartUploadBody({
+    filename: "report.pdf",
+    content: "binary",
+    contentType: "application/pdf",
+  });
+
+  const response = await fetch(`${baseUrl}/api/files/upload`, {
+    method: "POST",
+    headers: {
+      Origin: SITE_ORIGIN,
+      Cookie: cookie,
+      "Content-Type": multipart.contentType,
+    },
+    body: multipart.body.toString("utf8"),
+  });
+
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: "invalid_file_type" });
+  assert.equal(harness.fileRepository.rows.length, 0);
+  assert.equal(harness.fileStorage.putCalls.length, 0);
+});
+
+test("upload rejects oversize payload with 413 and no writes", async () => {
+  const harness = createHarness();
+  const { cookie } = seedAuthenticatedSession(harness, {
+    id: "11111111-1111-4111-8111-111111111111",
+  });
+  const { baseUrl } = await harness.start();
+  const multipart = makeMultipartUploadBody({
+    filename: "oversize.txt",
+    content: Buffer.alloc(FILE_UPLOAD_MAX_BYTES + 1, 65),
+    contentType: "text/plain",
+  });
+
+  const response = await fetch(`${baseUrl}/api/files/upload`, {
+    method: "POST",
+    headers: {
+      Origin: SITE_ORIGIN,
+      Cookie: cookie,
+      "Content-Type": multipart.contentType,
+    },
+    body: multipart.body.toString("utf8"),
+  });
+
+  assert.equal(response.status, 413);
+  assert.deepEqual(await response.json(), { error: "file_too_large" });
+  assert.equal(harness.fileRepository.rows.length, 0);
+  assert.equal(harness.fileStorage.putCalls.length, 0);
+});
+
+test("db failure after successful s3 put triggers delete compensation and orphan log on delete failure", async () => {
+  const harness = createHarness();
+  const { user, cookie } = seedAuthenticatedSession(harness, {
+    id: "11111111-1111-4111-8111-111111111111",
+  });
+  harness.fileRepository.failMarkUploadedOnce = new Error("write conflict");
+  harness.fileStorage.failDeleteOnce = new Error("delete unavailable");
+  const { baseUrl } = await harness.start();
+  const multipart = makeMultipartUploadBody({
+    filename: "session.txt",
+    content: "payload",
+    contentType: "text/plain",
+  });
+
+  const response = await fetch(`${baseUrl}/api/files/upload`, {
+    method: "POST",
+    headers: {
+      Origin: SITE_ORIGIN,
+      Cookie: cookie,
+      "Content-Type": multipart.contentType,
+    },
+    body: multipart.body.toString("utf8"),
+  });
+
+  assert.equal(response.status, 500);
+  assert.deepEqual(await response.json(), { error: "upload_failed" });
+  assert.equal(harness.fileStorage.putCalls.length, 1);
+  assert.equal(harness.fileStorage.deleteCalls.length, 1);
+  assert.equal(harness.fileRepository.rows.length, 1);
+  const row = harness.fileRepository.rows[0];
+  assert.ok(row);
+  assert.equal(row.status, "failed");
+  assert.equal(row.errorCode, "db_finalize_failed");
+  assert.equal(harness.fileStorage.deleteCalls[0], row.storageKeyOriginal);
+
+  const orphanLog = harness.fileLogs.find((entry) => entry.event === "orphan_s3_object");
+  assert.ok(orphanLog);
+  assert.equal(orphanLog.userId, user.id);
+  assert.equal(orphanLog.fileId, row.id);
+  assert.equal(orphanLog.key, row.storageKeyOriginal);
+});
+
+test("s3 put failure after db insert updates file row status to failed", async () => {
+  const harness = createHarness();
+  const { cookie } = seedAuthenticatedSession(harness, {
+    id: "11111111-1111-4111-8111-111111111111",
+  });
+  harness.fileStorage.failPutOnce = new Error("s3 timeout");
+  const { baseUrl } = await harness.start();
+  const multipart = makeMultipartUploadBody({
+    filename: "raw.vtt",
+    content: "WEBVTT\n\n00:00.000 --> 00:01.000\nHi",
+    contentType: "text/vtt",
+  });
+
+  const response = await fetch(`${baseUrl}/api/files/upload`, {
+    method: "POST",
+    headers: {
+      Origin: SITE_ORIGIN,
+      Cookie: cookie,
+      "Content-Type": multipart.contentType,
+    },
+    body: multipart.body.toString("utf8"),
+  });
+
+  assert.equal(response.status, 500);
+  assert.deepEqual(await response.json(), { error: "upload_failed" });
+  assert.equal(harness.fileRepository.rows.length, 1);
+  assert.equal(harness.fileStorage.putCalls.length, 1);
+  assert.equal(harness.fileStorage.deleteCalls.length, 0);
+  const row = harness.fileRepository.rows[0];
+  assert.ok(row);
+  assert.equal(row.status, "failed");
+  assert.equal(row.errorCode, "s3_put_failed");
+  assert.match(row.errorMessage ?? "", /s3 timeout/i);
 });

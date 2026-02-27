@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { Busboy, type BusboyHeaders } from "@fastify/busboy";
 
 import type { AdminUserListItem } from "../../app/admin_users/contracts.js";
 import { AdminUserAdminError, AdminUserService } from "../../app/admin_users/service.js";
@@ -10,6 +11,17 @@ import {
 } from "../../app/access_requests/service.js";
 import { AuthError, AuthService } from "../../app/auth/service.js";
 import { buildLoginRedirectLocation, sanitizeNextPath } from "../../app/auth/redirects.js";
+import {
+  FileDetailsService,
+  FileListService,
+  FileListValidationError,
+  FILE_UPLOAD_MAX_BYTES,
+  FileUploadError,
+  FileUploadService,
+  FileUploadValidationError,
+  normalizeListLimit,
+} from "../../app/files/service.js";
+import type { FileDetailsItem, FileListCursor, FileListItem } from "../../app/files/contracts.js";
 import {
   InviteAcceptError,
   InviteAdminError,
@@ -23,9 +35,11 @@ import { PostgresAccessRequestRepository } from "../../infra/access_requests/pos
 import { PostgresAdminUserRepository } from "../../infra/admin_users/postgres_admin_user_repository.js";
 import { PostgresAuthRepository } from "../../infra/auth/postgres_auth_repository.js";
 import { createPgPool } from "../../infra/db/client.js";
+import { PostgresFileRepository } from "../../infra/files/postgres_file_repository.js";
 import { PostgresInviteRepository } from "../../infra/invites/postgres_invite_repository.js";
 import { hashOpaqueToken } from "../../infra/security/token_hash.js";
 import { PostgresReportShareRepository } from "../../infra/shares/postgres_report_share_repository.js";
+import { createS3StorageService, loadS3StorageEnv } from "../../infra/storage/s3_client.js";
 import { buildClearSessionCookie, buildSessionCookie, getSessionCookieValue } from "./cookies.js";
 import { isAllowedOriginForStateChange } from "./csrf.js";
 import type { HttpServerConfig } from "./config.js";
@@ -37,6 +51,9 @@ export type AuthHttpServerDeps = {
   adminUserService: AdminUserService;
   inviteService: InviteService;
   reportShareService: ReportShareService;
+  fileUploadService: FileUploadService;
+  fileListService: FileListService;
+  fileDetailsService: FileDetailsService;
   siteOrigin: string;
   secureCookies: boolean;
 };
@@ -63,6 +80,9 @@ export function createDefaultAuthHttpServer(config: HttpServerConfig = loadHttpS
   const adminUserRepository = new PostgresAdminUserRepository(pool);
   const inviteRepository = new PostgresInviteRepository(pool);
   const reportShareRepository = new PostgresReportShareRepository(pool);
+  const fileRepository = new PostgresFileRepository(pool);
+  const s3Env = loadS3StorageEnv(process.env);
+  const s3Storage = createS3StorageService();
   const authService = new AuthService({ repository: authRepository });
   const accessRequestService = new AccessRequestService({
     repository: accessRequestRepository,
@@ -77,12 +97,27 @@ export function createDefaultAuthHttpServer(config: HttpServerConfig = loadHttpS
   const reportShareService = new ReportShareService({
     repository: reportShareRepository,
   });
+  const fileUploadService = new FileUploadService({
+    repository: fileRepository,
+    storage: s3Storage,
+    storageBucket: s3Env.S3_BUCKET,
+    logEvent: logEvent,
+  });
+  const fileListService = new FileListService({
+    repository: fileRepository,
+  });
+  const fileDetailsService = new FileDetailsService({
+    repository: fileRepository,
+  });
   const server = createAuthHttpServer({
     authService,
     accessRequestService,
     adminUserService,
     inviteService,
     reportShareService,
+    fileUploadService,
+    fileListService,
+    fileDetailsService,
     siteOrigin: config.siteOrigin,
     secureCookies: config.secureCookies,
   });
@@ -284,6 +319,126 @@ async function handleRequest(
     }
   }
 
+  if (method === "POST" && pathname === "/api/files/upload") {
+    const session = await tryGetSession(req, deps.authService);
+    if (!session) {
+      sendText(res, 401, "auth_required");
+      return;
+    }
+
+    let uploadPayload: MultipartUploadPayload;
+    try {
+      uploadPayload = await readMultipartUploadPayload(req);
+    } catch (error) {
+      if (error instanceof MultipartUploadError) {
+        sendJson(res, error.httpStatus, { error: error.code });
+        return;
+      }
+      throw error;
+    }
+
+    try {
+      const uploaded = await deps.fileUploadService.upload({
+        userId: session.user.id,
+        originalFilename: uploadPayload.filename,
+        mimeType: uploadPayload.mimeType,
+        sizeBytes: uploadPayload.bytes.length,
+        bytes: uploadPayload.bytes,
+      });
+
+      sendJson(res, 200, {
+        ok: true,
+        file_id: uploaded.fileId,
+        status: uploaded.status,
+      });
+      return;
+    } catch (error) {
+      if (error instanceof FileUploadValidationError) {
+        sendJson(res, error.httpStatus, { error: error.code });
+        return;
+      }
+
+      if (error instanceof FileUploadError) {
+        sendJson(res, error.httpStatus, { error: error.code });
+        return;
+      }
+
+      throw error;
+    }
+  }
+
+  if (method === "GET" && pathname === "/api/files") {
+    const session = await tryGetSession(req, deps.authService);
+    if (!session) {
+      sendText(res, 401, "auth_required");
+      return;
+    }
+
+    let cursor: FileListCursor | null = null;
+    try {
+      cursor = decodeFileListCursor(url.searchParams.get("cursor"));
+    } catch (error) {
+      if (error instanceof FileListCursorDecodeError) {
+        sendJson(res, error.httpStatus, { error: error.code });
+        return;
+      }
+      throw error;
+    }
+
+    try {
+      const rawLimit = url.searchParams.get("limit");
+      const parsedLimit = parseListLimit(rawLimit);
+      const listed = await deps.fileListService.listForUser({
+        userId: session.user.id,
+        limit: normalizeListLimit(parsedLimit),
+        cursor,
+      });
+
+      sendJson(res, 200, {
+        items: listed.items.map(serializeFileListItem),
+        next_cursor: listed.nextCursor ? encodeFileListCursor(listed.nextCursor) : null,
+      });
+      return;
+    } catch (error) {
+      if (error instanceof FileListValidationError) {
+        sendJson(res, error.httpStatus, { error: error.code });
+        return;
+      }
+      throw error;
+    }
+  }
+
+  if (method === "GET" && pathname.startsWith("/api/files/")) {
+    const fileId = parseFileIdFromPath(pathname);
+    if (!fileId) {
+      sendText(res, 404, "Not Found");
+      return;
+    }
+
+    const session = await tryGetSession(req, deps.authService);
+    if (!session) {
+      sendText(res, 401, "auth_required");
+      return;
+    }
+
+    if (!isCanonicalUuid(fileId)) {
+      sendJson(res, 400, { error: "invalid_id" });
+      return;
+    }
+
+    const item = await deps.fileDetailsService.getForUser({
+      id: fileId,
+      userId: session.user.id,
+    });
+    if (!item) {
+      sendText(res, 404, "Not Found");
+      return;
+    }
+
+    sendJson(res, 200, serializeFileDetailsItem(item));
+    return;
+  }
+
   if (pathname.startsWith("/api/admin/")) {
     const session = await tryGetSession(req, deps.authService);
     if (!session) {
@@ -480,6 +635,11 @@ async function handleRequest(
       return;
     }
 
+    if (method === "GET" && pathname === "/app") {
+      sendHtml(res, 200, renderAppDashboardPage(session));
+      return;
+    }
+
     sendHtml(res, 200, renderProtectedPage("app", pathname, session));
     return;
   }
@@ -598,6 +758,148 @@ async function readRequestBody(req: IncomingMessage): Promise<string> {
   }
 
   return Buffer.concat(chunks).toString("utf8");
+}
+
+type MultipartUploadPayload = {
+  filename: string;
+  mimeType: string | null;
+  bytes: Buffer;
+};
+
+class MultipartUploadError extends Error {
+  readonly httpStatus: 400 | 413;
+  readonly code: "invalid_multipart" | "file_too_large";
+
+  constructor(code: "invalid_multipart" | "file_too_large") {
+    super(code);
+    this.name = "MultipartUploadError";
+    this.code = code;
+    this.httpStatus = code === "file_too_large" ? 413 : 400;
+  }
+}
+
+class FileListCursorDecodeError extends Error {
+  readonly httpStatus = 400;
+  readonly code = "invalid_cursor";
+
+  constructor() {
+    super("invalid_cursor");
+    this.name = "FileListCursorDecodeError";
+  }
+}
+
+async function readMultipartUploadPayload(req: IncomingMessage): Promise<MultipartUploadPayload> {
+  const contentType = req.headers["content-type"] ?? "";
+  if (!contentType.toLowerCase().startsWith("multipart/form-data")) {
+    throw new MultipartUploadError("invalid_multipart");
+  }
+
+  return new Promise<MultipartUploadPayload>((resolve, reject) => {
+    const headers: BusboyHeaders = {
+      ...req.headers,
+      "content-type": contentType,
+    };
+    const parser = new Busboy({
+      headers,
+      limits: {
+        files: 1,
+        fileSize: FILE_UPLOAD_MAX_BYTES,
+      },
+    });
+
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let seenFileField = false;
+    let finished = false;
+    let filename = "";
+    let mimeType: string | null = null;
+
+    const rejectOnce = (error: Error): void => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      req.unpipe(parser);
+      req.resume();
+      reject(error);
+    };
+
+    const resolveOnce = (payload: MultipartUploadPayload): void => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      resolve(payload);
+    };
+
+    parser.on(
+      "file",
+      (
+        fieldname: string,
+        stream: NodeJS.ReadableStream,
+        incomingFilename: string,
+        _encoding: string,
+        incomingMimeType: string,
+      ) => {
+        if (fieldname !== "file") {
+          stream.resume();
+          return;
+        }
+
+        seenFileField = true;
+        filename = incomingFilename;
+        const normalizedMimeType = incomingMimeType.trim().toLowerCase();
+        mimeType = normalizedMimeType === "" ? null : normalizedMimeType;
+
+        stream.on("limit", () => {
+          rejectOnce(new MultipartUploadError("file_too_large"));
+        });
+
+        stream.on("data", (chunk: Buffer | string) => {
+          const bufferChunk = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          size += bufferChunk.length;
+          if (size > FILE_UPLOAD_MAX_BYTES) {
+            rejectOnce(new MultipartUploadError("file_too_large"));
+            return;
+          }
+          chunks.push(bufferChunk);
+        });
+
+        stream.on("error", (error: unknown) => {
+          void error;
+          rejectOnce(new MultipartUploadError("invalid_multipart"));
+        });
+      },
+    );
+
+    parser.on("filesLimit", () => {
+      rejectOnce(new MultipartUploadError("invalid_multipart"));
+    });
+
+    parser.on("error", (error: unknown) => {
+      void error;
+      rejectOnce(new MultipartUploadError("invalid_multipart"));
+    });
+
+    parser.on("finish", () => {
+      if (!seenFileField) {
+        rejectOnce(new MultipartUploadError("invalid_multipart"));
+        return;
+      }
+
+      resolveOnce({
+        filename,
+        mimeType,
+        bytes: Buffer.concat(chunks, size),
+      });
+    });
+
+    req.on("aborted", () => {
+      rejectOnce(new MultipartUploadError("invalid_multipart"));
+    });
+
+    req.pipe(parser);
+  });
 }
 
 function redirect(res: ServerResponse, statusCode: 302 | 303, location: string): void {
@@ -1216,12 +1518,434 @@ function normalizeAdminStatusFilterForUi(
 }
 
 function logAccessRequestEvent(event: string, fields: Record<string, unknown>): void {
+  logEvent(event, fields);
+}
+
+function logEvent(event: string, fields: Record<string, unknown>): void {
   console.info(
     JSON.stringify({
       event,
       ...fields,
     }),
   );
+}
+
+function renderAppDashboardPage(session: AuthenticatedSession): string {
+  return `
+    <h1>Files dashboard</h1>
+    <p>email: ${escapeHtml(session.user.email)}</p>
+    <p>role: ${escapeHtml(session.user.role)}</p>
+    <form method="post" action="/api/auth/logout">
+      <button type="submit">Logout</button>
+    </form>
+
+    <hr />
+
+    <p id="app-files-status" aria-live="polite"></p>
+    <form id="app-upload-form">
+      <label>
+        Upload file
+        <input id="app-upload-input" type="file" name="file" accept=".txt,.vtt" required />
+      </label>
+      <button id="app-upload-button" type="submit">Upload</button>
+    </form>
+    <p><small>Supported types: .txt, .vtt</small></p>
+    <p><small>Polling refresh: every 7 seconds</small></p>
+
+    <button id="app-refresh-button" type="button">Refresh</button>
+    <table id="app-files-table" border="1" cellpadding="4" cellspacing="0">
+      <thead>
+        <tr>
+          <th>filename</th>
+          <th>created_at</th>
+          <th>status</th>
+          <th>size</th>
+        </tr>
+      </thead>
+      <tbody id="app-files-body">
+        <tr><td colspan="4">No files yet</td></tr>
+      </tbody>
+    </table>
+    <p>
+      <button id="app-load-more-button" type="button" hidden>Load more</button>
+    </p>
+
+    <div
+      id="app-file-overlay"
+      hidden
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="app-file-overlay-title"
+      style="position:fixed;inset:0;background:rgba(0,0,0,0.4);padding:24px;"
+    >
+      <div style="background:#fff;max-width:760px;margin:0 auto;padding:16px;">
+        <p style="text-align:right;">
+          <button id="app-file-overlay-close" type="button">Close</button>
+        </p>
+        <h2 id="app-file-overlay-title">File metadata</h2>
+        <p id="app-file-overlay-status" aria-live="polite"></p>
+        <pre id="app-file-overlay-content" style="white-space:pre-wrap;"></pre>
+        <p>Report not available yet (Epic 3)</p>
+      </div>
+    </div>
+
+    <script>
+      (() => {
+        const LIST_FIRST_PAGE_URL = "/api/files?limit=20";
+        const POLL_INTERVAL_MS = 7000;
+        const statusNode = document.getElementById("app-files-status");
+        const uploadForm = document.getElementById("app-upload-form");
+        const uploadInput = document.getElementById("app-upload-input");
+        const uploadButton = document.getElementById("app-upload-button");
+        const refreshButton = document.getElementById("app-refresh-button");
+        const loadMoreButton = document.getElementById("app-load-more-button");
+        const filesBody = document.getElementById("app-files-body");
+        const overlay = document.getElementById("app-file-overlay");
+        const overlayClose = document.getElementById("app-file-overlay-close");
+        const overlayStatus = document.getElementById("app-file-overlay-status");
+        const overlayContent = document.getElementById("app-file-overlay-content");
+
+        if (
+          !(statusNode instanceof HTMLElement) ||
+          !(uploadForm instanceof HTMLFormElement) ||
+          !(uploadInput instanceof HTMLInputElement) ||
+          !(uploadButton instanceof HTMLButtonElement) ||
+          !(refreshButton instanceof HTMLButtonElement) ||
+          !(loadMoreButton instanceof HTMLButtonElement) ||
+          !(filesBody instanceof HTMLTableSectionElement) ||
+          !(overlay instanceof HTMLElement) ||
+          !(overlayClose instanceof HTMLButtonElement) ||
+          !(overlayStatus instanceof HTMLElement) ||
+          !(overlayContent instanceof HTMLElement)
+        ) {
+          return;
+        }
+
+        let nextCursor = null;
+        let isUploading = false;
+        let isLoadingFirstPage = false;
+        let isLoadingMore = false;
+
+        function setStatus(message) {
+          statusNode.textContent = message;
+        }
+
+        function getExtension(filename) {
+          if (typeof filename !== "string") {
+            return "";
+          }
+          const normalized = filename.trim().toLowerCase();
+          const dotIndex = normalized.lastIndexOf(".");
+          if (dotIndex < 0 || dotIndex === normalized.length - 1) {
+            return "";
+          }
+          return normalized.slice(dotIndex + 1);
+        }
+
+        function isSupportedFileName(filename) {
+          const extension = getExtension(filename);
+          return extension === "txt" || extension === "vtt";
+        }
+
+        function formatDate(value) {
+          if (typeof value !== "string") {
+            return "";
+          }
+          const parsed = new Date(value);
+          if (Number.isNaN(parsed.getTime())) {
+            return value;
+          }
+          return parsed.toISOString();
+        }
+
+        function formatSize(value) {
+          if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+            return "";
+          }
+          return value + " B";
+        }
+
+        function clearRows() {
+          filesBody.replaceChildren();
+        }
+
+        function appendEmptyRow() {
+          const row = document.createElement("tr");
+          const cell = document.createElement("td");
+          cell.colSpan = 4;
+          cell.textContent = "No files yet";
+          row.appendChild(cell);
+          filesBody.appendChild(row);
+        }
+
+        function openOverlay() {
+          overlay.hidden = false;
+        }
+
+        function closeOverlay() {
+          overlay.hidden = true;
+          overlayStatus.textContent = "";
+          overlayContent.textContent = "";
+        }
+
+        function updateLoadMoreButton() {
+          loadMoreButton.hidden = nextCursor === null;
+          loadMoreButton.disabled = isLoadingFirstPage || isLoadingMore || isUploading || nextCursor === null;
+        }
+
+        async function fetchListPage(cursor) {
+          const url = cursor
+            ? LIST_FIRST_PAGE_URL + "&cursor=" + encodeURIComponent(cursor)
+            : LIST_FIRST_PAGE_URL;
+          const response = await fetch(url, {
+            headers: {
+              Accept: "application/json",
+            },
+          });
+
+          if (!response.ok) {
+            throw new Error("list_request_failed:" + String(response.status));
+          }
+
+          const payload = await response.json();
+          const items = payload && Array.isArray(payload.items) ? payload.items : [];
+          const decodedNextCursor =
+            payload && typeof payload.next_cursor === "string" && payload.next_cursor !== ""
+              ? payload.next_cursor
+              : null;
+          return { items, nextCursor: decodedNextCursor };
+        }
+
+        async function openFileDetails(fileId) {
+          openOverlay();
+          overlayStatus.textContent = "Loading metadata...";
+          overlayContent.textContent = "";
+          try {
+            const response = await fetch("/api/files/" + encodeURIComponent(fileId), {
+              headers: {
+                Accept: "application/json",
+              },
+            });
+
+            if (response.status === 404) {
+              overlayStatus.textContent = "File not found.";
+              return;
+            }
+            if (!response.ok) {
+              overlayStatus.textContent = "Unable to load file metadata.";
+              return;
+            }
+
+            const payload = await response.json();
+            overlayStatus.textContent = "";
+            overlayContent.textContent = JSON.stringify(payload, null, 2);
+          } catch {
+            overlayStatus.textContent = "Unable to load file metadata.";
+          }
+        }
+
+        function makeFileRow(item) {
+          const row = document.createElement("tr");
+          const filenameCell = document.createElement("td");
+          const createdAtCell = document.createElement("td");
+          const statusCell = document.createElement("td");
+          const sizeCell = document.createElement("td");
+
+          const fileId = item && typeof item.id === "string" ? item.id : "";
+          filenameCell.textContent =
+            item && typeof item.original_filename === "string" ? item.original_filename : "";
+          createdAtCell.textContent = formatDate(item ? item.created_at : null);
+          statusCell.textContent = item && typeof item.status === "string" ? item.status : "";
+          sizeCell.textContent = formatSize(item ? item.size_bytes : null);
+
+          row.appendChild(filenameCell);
+          row.appendChild(createdAtCell);
+          row.appendChild(statusCell);
+          row.appendChild(sizeCell);
+          row.style.cursor = "pointer";
+          row.tabIndex = 0;
+
+          const openHandler = () => {
+            if (!fileId) {
+              return;
+            }
+            void openFileDetails(fileId);
+          };
+          row.addEventListener("click", openHandler);
+          row.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              openHandler();
+            }
+          });
+
+          return row;
+        }
+
+        function renderRows(items, append) {
+          if (!append) {
+            clearRows();
+          }
+          for (const item of items) {
+            filesBody.appendChild(makeFileRow(item));
+          }
+          if (!append && items.length === 0) {
+            appendEmptyRow();
+          }
+        }
+
+        async function loadFirstPage(reason) {
+          if (isLoadingFirstPage || isLoadingMore || isUploading) {
+            return;
+          }
+          isLoadingFirstPage = true;
+          updateLoadMoreButton();
+          if (reason !== "poll") {
+            setStatus("Loading files...");
+          }
+          try {
+            const result = await fetchListPage(null);
+            renderRows(result.items, false);
+            nextCursor = result.nextCursor;
+            if (result.items.length === 0) {
+              setStatus("No files yet.");
+            } else if (reason !== "poll") {
+              setStatus("");
+            }
+          } catch {
+            if (reason !== "poll") {
+              setStatus("Unable to load files.");
+            }
+          } finally {
+            isLoadingFirstPage = false;
+            updateLoadMoreButton();
+          }
+        }
+
+        async function loadMore() {
+          if (isLoadingMore || isLoadingFirstPage || isUploading || nextCursor === null) {
+            return;
+          }
+          const cursor = nextCursor;
+          isLoadingMore = true;
+          updateLoadMoreButton();
+          setStatus("Loading more...");
+          try {
+            const result = await fetchListPage(cursor);
+            renderRows(result.items, true);
+            nextCursor = result.nextCursor;
+            setStatus("");
+          } catch {
+            setStatus("Unable to load more files.");
+          } finally {
+            isLoadingMore = false;
+            updateLoadMoreButton();
+          }
+        }
+
+        function setUploadUi(uploading) {
+          isUploading = uploading;
+          uploadInput.disabled = uploading;
+          uploadButton.disabled = uploading;
+          uploadButton.textContent = uploading ? "Uploading..." : "Upload";
+          updateLoadMoreButton();
+        }
+
+        uploadInput.addEventListener("change", () => {
+          const file = uploadInput.files && uploadInput.files[0] ? uploadInput.files[0] : null;
+          if (!file) {
+            return;
+          }
+          if (!isSupportedFileName(file.name)) {
+            setStatus("Please select a .txt or .vtt file.");
+          } else {
+            setStatus("");
+          }
+        });
+
+        uploadForm.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          const file = uploadInput.files && uploadInput.files[0] ? uploadInput.files[0] : null;
+          if (!file) {
+            setStatus("Select a file to upload.");
+            return;
+          }
+          if (!isSupportedFileName(file.name)) {
+            setStatus("Please select a .txt or .vtt file.");
+            return;
+          }
+
+          setUploadUi(true);
+          setStatus("Uploading...");
+          const formData = new FormData();
+          formData.append("file", file);
+          try {
+            const response = await fetch("/api/files/upload", {
+              method: "POST",
+              body: formData,
+            });
+            if (response.ok) {
+              uploadInput.value = "";
+              setStatus("Upload complete.");
+              await loadFirstPage("upload");
+              return;
+            }
+            if (response.status === 413) {
+              setStatus("File too large");
+              return;
+            }
+
+            let errorCode = "";
+            try {
+              const payload = await response.json();
+              if (payload && typeof payload.error === "string") {
+                errorCode = payload.error;
+              }
+            } catch {}
+
+            if (errorCode === "invalid_file_type") {
+              setStatus("Please select a .txt or .vtt file.");
+              return;
+            }
+            setStatus("Upload failed.");
+          } catch {
+            setStatus("Upload failed.");
+          } finally {
+            setUploadUi(false);
+          }
+        });
+
+        refreshButton.addEventListener("click", () => {
+          void loadFirstPage("manual");
+        });
+
+        loadMoreButton.addEventListener("click", () => {
+          void loadMore();
+        });
+
+        overlayClose.addEventListener("click", closeOverlay);
+        overlay.addEventListener("click", (event) => {
+          if (event.target === overlay) {
+            closeOverlay();
+          }
+        });
+        document.addEventListener("keydown", (event) => {
+          if (event.key === "Escape" && !overlay.hidden) {
+            closeOverlay();
+          }
+        });
+
+        window.setInterval(() => {
+          if (document.hidden) {
+            return;
+          }
+          void loadFirstPage("poll");
+        }, POLL_INTERVAL_MS);
+
+        void loadFirstPage("initial");
+      })();
+    </script>
+  `;
 }
 
 function renderProtectedPage(
@@ -1272,6 +1996,101 @@ function serializeAdminUser(item: AdminUserListItem): Record<string, string | nu
   };
 }
 
+function serializeFileListItem(item: FileListItem): {
+  id: string;
+  original_filename: string;
+  extension: string;
+  size_bytes: number;
+  status: string;
+  created_at: string;
+  updated_at: string;
+} {
+  return {
+    id: item.id,
+    original_filename: item.originalFilename,
+    extension: item.extension,
+    size_bytes: item.sizeBytes,
+    status: item.status,
+    created_at: item.createdAt.toISOString(),
+    updated_at: item.updatedAt.toISOString(),
+  };
+}
+
+function serializeFileDetailsItem(item: FileDetailsItem): {
+  id: string;
+  original_filename: string;
+  extension: string;
+  size_bytes: number;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  error_code: string | null;
+  error_message: string | null;
+} {
+  const isFailed = item.status === "failed";
+  return {
+    id: item.id,
+    original_filename: item.originalFilename,
+    extension: item.extension,
+    size_bytes: item.sizeBytes,
+    status: item.status,
+    created_at: item.createdAt.toISOString(),
+    updated_at: item.updatedAt.toISOString(),
+    error_code: isFailed ? item.errorCode : null,
+    error_message: isFailed ? sanitizeFileErrorMessageForResponse(item.errorMessage) : null,
+  };
+}
+
+function parseListLimit(rawValue: string | null): number | null {
+  if (rawValue == null || rawValue.trim() === "") {
+    return null;
+  }
+
+  if (!/^\d+$/.test(rawValue.trim())) {
+    throw new FileListValidationError();
+  }
+
+  return Number.parseInt(rawValue, 10);
+}
+
+function encodeFileListCursor(cursor: FileListCursor): string {
+  return Buffer.from(
+    JSON.stringify({
+      created_at: cursor.createdAt.toISOString(),
+      id: cursor.id,
+    }),
+    "utf8",
+  ).toString("base64url");
+}
+
+function decodeFileListCursor(rawCursor: string | null): FileListCursor | null {
+  if (rawCursor == null || rawCursor.trim() === "") {
+    return null;
+  }
+
+  try {
+    const payload = Buffer.from(rawCursor, "base64url").toString("utf8");
+    const parsed = JSON.parse(payload) as Record<string, unknown>;
+    const createdAtRaw = parsed.created_at;
+    const id = parsed.id;
+    if (typeof createdAtRaw !== "string" || typeof id !== "string") {
+      throw new FileListCursorDecodeError();
+    }
+
+    const createdAt = new Date(createdAtRaw);
+    if (Number.isNaN(createdAt.getTime()) || !isCanonicalUuid(id)) {
+      throw new FileListCursorDecodeError();
+    }
+
+    return { createdAt, id };
+  } catch (error) {
+    if (error instanceof FileListCursorDecodeError) {
+      throw error;
+    }
+    throw new FileListCursorDecodeError();
+  }
+}
+
 function buildPathAndQuery(url: URL): string {
   return `${url.pathname}${url.search}`;
 }
@@ -1282,6 +2101,10 @@ function parseInviteTokenFromPath(pathname: string): string | null {
 
 function parseShareTokenFromPath(pathname: string): string | null {
   return parseSinglePathToken(pathname, "/share/");
+}
+
+function parseFileIdFromPath(pathname: string): string | null {
+  return parseSinglePathToken(pathname, "/api/files/");
 }
 
 function parseSinglePathToken(pathname: string, prefix: string): string | null {
@@ -1300,6 +2123,25 @@ function parseSinglePathToken(pathname: string, prefix: string): string | null {
   } catch {
     return null;
   }
+}
+
+function isCanonicalUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    value,
+  );
+}
+
+function sanitizeFileErrorMessageForResponse(value: string | null): string | null {
+  if (value === null) {
+    return null;
+  }
+
+  const collapsed = value.replace(/\s+/g, " ").trim();
+  if (!collapsed) {
+    return null;
+  }
+
+  return collapsed.slice(0, 280);
 }
 
 function escapeHtml(value: string): string {

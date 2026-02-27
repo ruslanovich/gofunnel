@@ -29,6 +29,13 @@
 - ADR-0003 Rate limit storage: `docs/05_decisions/2026-02-26_adr-0003_rate-limit-storage.md`
 - ADR-0004 Token hashing: `docs/05_decisions/2026-02-26_adr-0004_token-hashing.md`
 
+## Recent planning artifacts (2026-02-27)
+
+- Epic 2 execution plan: `docs/03_execution_plans/2026-02-27_epic-2-upload-files.md`
+- ADR-0005 S3 client + Yandex config: `docs/05_decisions/2026-02-27_adr-0005_s3-client-yandex-object-storage-config.md`
+- ADR-0006 Upload transport strategy: `docs/05_decisions/2026-02-27_adr-0006_upload-transport-strategy.md`
+- ADR-0007 Files pagination strategy: `docs/05_decisions/2026-02-27_adr-0007_files-list-pagination-strategy.md`
+
 ## Важные корневые документы
 
 - Agent map: `AGENTS.md`

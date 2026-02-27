@@ -20,3 +20,9 @@
 - `docs/05_decisions/2026-02-26_adr-0002_session-strategy.md`
 - `docs/05_decisions/2026-02-26_adr-0003_rate-limit-storage.md`
 - `docs/05_decisions/2026-02-26_adr-0004_token-hashing.md`
+
+Текущие ADR (Epic 2):
+
+- `docs/05_decisions/2026-02-27_adr-0005_s3-client-yandex-object-storage-config.md`
+- `docs/05_decisions/2026-02-27_adr-0006_upload-transport-strategy.md`
+- `docs/05_decisions/2026-02-27_adr-0007_files-list-pagination-strategy.md`

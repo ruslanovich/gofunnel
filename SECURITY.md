@@ -215,3 +215,82 @@ MVP strategy for Epic 1 auth/admin POST endpoints (PR-2.1):
 - Current route output is intentionally read-only placeholder:
   - page shows only `Shared report placeholder` and resolved `report_ref`
   - no edit actions are exposed
+
+## Epic 2 PR-1.1 implemented controls (files schema only)
+
+- Added `files` metadata table in Postgres with strict checks:
+  - `extension` is limited to `txt|vtt`
+  - `status` is limited to `uploaded|queued|processing|succeeded|failed`
+  - `size_bytes` must be positive (`> 0`)
+- Ownership boundary is encoded at schema level:
+  - `files.user_id` references `users(id)` and supports owner-scoped query paths with dedicated indexes
+  - list path index: `(user_id, created_at DESC, id DESC)`
+  - owner lookup index: `(user_id, id)`
+- Storage boundary remains explicit:
+  - Postgres stores metadata only (`storage_bucket`, `storage_key_original`, file attributes/status/error fields)
+  - file content bytes are not stored in Postgres and are intended to stay in S3-compatible object storage.
+
+## Epic 2 PR-2.1 implemented controls (S3 adapter + env contract)
+
+- Added server-side S3 adapter using AWS SDK v3 `S3Client` for Yandex Object Storage compatibility.
+- Runtime now fails fast when any required S3 env variable is missing:
+  - `S3_ENDPOINT`
+  - `S3_REGION`
+  - `S3_BUCKET`
+  - `S3_ACCESS_KEY_ID`
+  - `S3_SECRET_ACCESS_KEY`
+- S3 credentials remain server-side only:
+  - credentials are loaded from server environment during adapter construction
+  - no browser/client exposure path is introduced in PR-2.1 (no presigned URL flow yet)
+  - no credentials are persisted to Postgres or repository files.
+
+## Epic 2 PR-3.1 implemented controls (upload endpoint only)
+
+- Added authenticated upload API endpoint:
+  - `POST /api/files/upload` requires a valid session (`401 auth_required` otherwise)
+  - `user_id` binding is server-side only, taken from session context and never from request body
+- Input validation and file-type controls:
+  - accepted transport is `multipart/form-data` with field name `file`
+  - only `.txt` and `.vtt` extensions are accepted (server derives extension from filename, not from client MIME)
+  - upload size is capped by server constant `FILE_UPLOAD_MAX_BYTES = 10MB` (oversize => `413 file_too_large`)
+- Storage and metadata boundaries:
+  - object key is deterministic and owner-scoped: `users/<userId>/files/<fileId>/original.<ext>`
+  - Postgres `files` row stores metadata (`storage_bucket`, `storage_key_original`, filename/ext/mime/size/status/error fields)
+  - raw file bytes are sent to S3-compatible storage; plaintext credentials are never returned to clients
+- Logging policy for upload failures:
+  - structured orphan log event is emitted only when compensation delete fails:
+    - `event=orphan_s3_object`
+    - fields: `userId`, `fileId`, `key`
+  - no S3 secrets or credential values are logged by upload path code.
+
+## Epic 2 PR-3.2 implemented controls (files list endpoint only)
+
+- Added authenticated list API endpoint:
+  - `GET /api/files` requires a valid session (`401 auth_required` otherwise)
+  - owner binding is server-side only via current session user id
+- Owner isolation for list reads:
+  - list query is always scoped by `files.user_id = <session.user.id>`
+  - rows of other users are never included in list response
+- Cursor pagination boundary:
+  - keyset ordering is fixed: `created_at DESC, id DESC`
+  - cursor is treated as opaque API token and validated server-side
+  - invalid cursor token returns `400` with `invalid_cursor`
+- Response minimization:
+  - list returns only MVP metadata fields (`id`, `original_filename`, `extension`, `size_bytes`, `status`, `created_at`, `updated_at`)
+  - storage internals (`storage_bucket`, `storage_key_original`) are intentionally excluded from list payload
+  - no S3 credentials/secrets are exposed by list endpoint.
+
+## Epic 2 PR-3.3 implemented controls (file details endpoint only)
+
+- Added authenticated file-details API endpoint:
+  - `GET /api/files/:id` requires a valid session (`401 auth_required` otherwise)
+  - `:id` must be canonical UUID, otherwise endpoint returns `400` with `invalid_id`
+- Owner-only access with existence masking:
+  - lookup is always owner-scoped by `(files.id, files.user_id=<session.user.id>)`
+  - missing file and non-owned file are both returned as `404 Not Found` (no existence disclosure across users)
+- Response minimization and error hygiene:
+  - endpoint returns only MVP metadata fields:
+    - `id`, `original_filename`, `extension`, `size_bytes`, `status`, `created_at`, `updated_at`, `error_code`, `error_message`
+  - storage internals (`storage_bucket`, `storage_key_original`) remain excluded from response
+  - `error_message` in response is sanitized (whitespace-collapsed + bounded length); for non-`failed` statuses, `error_code/error_message` are `null`
+  - no S3 credentials/secrets are exposed by details endpoint.
