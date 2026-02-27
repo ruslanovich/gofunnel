@@ -21,3 +21,4 @@
 - `docs/03_execution_plans/2026-02-26_epic-1-identity-onboarding-share.md`
 - `docs/03_execution_plans/2026-02-27_epic-2-upload-files.md`
 - `docs/03_execution_plans/2026-02-27_pr-4-1-app-ui-upload-list-overlay-polling.md`
+- `docs/03_execution_plans/2026-02-27_pr-dx-ci-node-deps-install.md`
