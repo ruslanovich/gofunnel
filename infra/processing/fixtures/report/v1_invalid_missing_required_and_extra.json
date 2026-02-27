@@ -1,0 +1,13 @@
+{
+  "overview": "Transcript has conflicting budget expectations and no owner assigned yet.",
+  "highlights": [
+    "Procurement process is unclear."
+  ],
+  "nextSteps": [
+    {
+      "owner": "SE",
+      "action": "Clarify procurement path"
+    }
+  ],
+  "extraField": "should-not-be-here"
+}

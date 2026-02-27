@@ -6,6 +6,7 @@ import type {
   FileListItem,
   FileListCursor,
   FileMetadataRepository,
+  FileReportItem,
 } from "../../app/files/contracts.js";
 
 export class PostgresFileRepository implements FileMetadataRepository {
@@ -42,22 +43,11 @@ export class PostgresFileRepository implements FileMetadataRepository {
     );
   }
 
-  async markFileUploaded(input: { id: string; userId: string }): Promise<void> {
-    const result = await this.pool.query(
-      `
-      UPDATE files
-      SET
-        status = 'uploaded',
-        error_code = NULL,
-        error_message = NULL,
-        updated_at = NOW()
-      WHERE id = $1 AND user_id = $2
-      `,
-      [input.id, input.userId],
-    );
+  async markFileQueued(input: { id: string; userId: string }): Promise<void> {
+    const result = await this.updateFileQueuedWithQueuedAtFallback(input);
 
     if ((result.rowCount ?? 0) !== 1) {
-      throw new Error("file_not_found_for_upload_finalize");
+      throw new Error("file_not_found_for_queue_finalize");
     }
   }
 
@@ -188,6 +178,74 @@ export class PostgresFileRepository implements FileMetadataRepository {
 
     return mapDetailsRow(row);
   }
+
+  async findFileReportForUser(input: { id: string; userId: string }): Promise<FileReportItem | null> {
+    const result = await this.pool.query<{
+      id: string;
+      status: FileReportItem["status"];
+      storage_key_report: string | null;
+    }>(
+      `
+      SELECT
+        id,
+        status,
+        storage_key_report
+      FROM files
+      WHERE id = $1::uuid AND user_id = $2::uuid
+      LIMIT 1
+      `,
+      [input.id, input.userId],
+    );
+
+    const row = result.rows[0];
+    if (!row) {
+      return null;
+    }
+
+    return {
+      id: row.id,
+      status: row.status,
+      storageKeyReport: row.storage_key_report,
+    };
+  }
+
+  private async updateFileQueuedWithQueuedAtFallback(input: {
+    id: string;
+    userId: string;
+  }): Promise<{ rowCount?: number | null }> {
+    try {
+      return await this.pool.query(
+        `
+        UPDATE files
+        SET
+          status = 'queued',
+          queued_at = COALESCE(queued_at, NOW()),
+          error_code = NULL,
+          error_message = NULL,
+          updated_at = NOW()
+        WHERE id = $1 AND user_id = $2
+        `,
+        [input.id, input.userId],
+      );
+    } catch (error) {
+      if (!isUndefinedColumnError(error)) {
+        throw error;
+      }
+
+      return this.pool.query(
+        `
+        UPDATE files
+        SET
+          status = 'queued',
+          error_code = NULL,
+          error_message = NULL,
+          updated_at = NOW()
+        WHERE id = $1 AND user_id = $2
+        `,
+        [input.id, input.userId],
+      );
+    }
+  }
 }
 
 function mapListRow(row: {
@@ -232,4 +290,13 @@ function mapDetailsRow(row: {
     errorCode: row.error_code,
     errorMessage: row.error_message,
   };
+}
+
+function isUndefinedColumnError(error: unknown): boolean {
+  return (
+    typeof error === "object"
+    && error !== null
+    && "code" in error
+    && (error as { code?: string }).code === "42703"
+  );
 }

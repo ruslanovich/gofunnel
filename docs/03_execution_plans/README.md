@@ -20,5 +20,9 @@
 
 - `docs/03_execution_plans/2026-02-26_epic-1-identity-onboarding-share.md`
 - `docs/03_execution_plans/2026-02-27_epic-2-upload-files.md`
+- `docs/03_execution_plans/2026-02-27_epic-3-processing-reports.md`
+- `docs/03_execution_plans/2026-02-27_pr-3-1-llm-adapter-ajv-validation.md`
+- `docs/03_execution_plans/2026-02-27_pr-3-2-worker-pipeline-s3-llm-validate-s3-db.md`
+- `docs/03_execution_plans/2026-02-27_pr-3-3-get-report-endpoint.md`
 - `docs/03_execution_plans/2026-02-27_pr-4-1-app-ui-upload-list-overlay-polling.md`
 - `docs/03_execution_plans/2026-02-27_pr-dx-ci-node-deps-install.md`

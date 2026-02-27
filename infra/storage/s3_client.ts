@@ -1,9 +1,11 @@
 import {
   DeleteObjectCommand,
+  GetObjectCommand,
   HeadObjectCommand,
   type HeadObjectCommandOutput,
   PutObjectCommand,
   S3Client,
+  type GetObjectCommandOutput,
   type S3ClientConfig,
   type PutObjectCommandInput,
 } from "@aws-sdk/client-s3";
@@ -29,6 +31,7 @@ type CommandSender = {
 export type S3StorageService = {
   putObject(key: string, body: S3ObjectBody, contentType: string): Promise<void>;
   deleteObject(key: string): Promise<void>;
+  getObjectText(key: string): Promise<string>;
   headObject(key: string): Promise<HeadObjectCommandOutput>;
 };
 
@@ -96,6 +99,22 @@ export function createS3StorageService(options?: {
           Key: key,
         }),
       );
+    },
+
+    async getObjectText(key: string): Promise<string> {
+      const output = await client.send(
+        new GetObjectCommand({
+          Bucket: bucket,
+          Key: key,
+        }),
+      ) as GetObjectCommandOutput;
+
+      const body = output.Body;
+      if (!body || typeof (body as { transformToString?: unknown }).transformToString !== "function") {
+        throw new Error("s3_get_object_missing_body");
+      }
+
+      return await (body as { transformToString: () => Promise<string> }).transformToString();
     },
 
     async headObject(key: string): Promise<HeadObjectCommandOutput> {

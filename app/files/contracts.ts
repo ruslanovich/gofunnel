@@ -57,9 +57,15 @@ export type FileDetailsItem = {
   errorMessage: string | null;
 };
 
+export type FileReportItem = {
+  id: string;
+  status: FileStatus;
+  storageKeyReport: string | null;
+};
+
 export interface FileMetadataRepository {
   createProcessingFile(input: CreateProcessingFileInput): Promise<void>;
-  markFileUploaded(input: { id: string; userId: string }): Promise<void>;
+  markFileQueued(input: { id: string; userId: string }): Promise<void>;
   markFileFailed(input: {
     id: string;
     userId: string;
@@ -72,9 +78,18 @@ export interface FileMetadataRepository {
     cursor: FileListCursor | null;
   }): Promise<FileListItem[]>;
   findFileForUser(input: { id: string; userId: string }): Promise<FileDetailsItem | null>;
+  findFileReportForUser(input: { id: string; userId: string }): Promise<FileReportItem | null>;
+}
+
+export interface ProcessingJobQueueRepository {
+  enqueueForFile(input: { fileId: string }): Promise<void>;
 }
 
 export interface FileObjectStorage {
   putObject(key: string, body: Buffer, contentType: string): Promise<void>;
   deleteObject(key: string): Promise<void>;
+}
+
+export interface FileReportStorage {
+  getObjectText(key: string): Promise<string>;
 }

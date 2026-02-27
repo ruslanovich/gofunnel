@@ -1,6 +1,7 @@
 import { afterEach, test } from "node:test";
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
+import { runInNewContext } from "node:vm";
 
 import type {
   AdminUserListItem,
@@ -30,11 +31,13 @@ import type {
   FileMetadataRepository,
   FileObjectStorage,
   FileRecord,
+  ProcessingJobQueueRepository,
 } from "../../app/files/contracts.js";
 import {
   FILE_UPLOAD_MAX_BYTES,
   FileDetailsService,
   FileListService,
+  FileReportService,
   FileUploadService,
 } from "../../app/files/service.js";
 import type { ReportShareRepository, StoredReportShare } from "../../app/shares/contracts.js";
@@ -585,9 +588,15 @@ class InMemoryReportShareRepository implements ReportShareRepository {
 }
 
 class InMemoryFileRepository implements FileMetadataRepository {
-  rows: Array<FileRecord & { createdAt: Date; updatedAt: Date }> = [];
+  rows: Array<
+    FileRecord & {
+      createdAt: Date;
+      updatedAt: Date;
+      storageKeyReport: string | null;
+    }
+  > = [];
   failCreateProcessingOnce: Error | null = null;
-  failMarkUploadedOnce: Error | null = null;
+  failMarkQueuedOnce: Error | null = null;
   failMarkFailedOnce: Error | null = null;
 
   async createProcessingFile(input: CreateProcessingFileInput): Promise<void> {
@@ -602,21 +611,22 @@ class InMemoryFileRepository implements FileMetadataRepository {
       status: "processing",
       errorCode: null,
       errorMessage: null,
+      storageKeyReport: null,
       createdAt: new Date(),
       updatedAt: new Date(),
     });
   }
 
-  async markFileUploaded(input: { id: string; userId: string }): Promise<void> {
-    if (this.failMarkUploadedOnce) {
-      const error = this.failMarkUploadedOnce;
-      this.failMarkUploadedOnce = null;
+  async markFileQueued(input: { id: string; userId: string }): Promise<void> {
+    if (this.failMarkQueuedOnce) {
+      const error = this.failMarkQueuedOnce;
+      this.failMarkQueuedOnce = null;
       throw error;
     }
 
     const row = this.rows.find((candidate) => candidate.id === input.id && candidate.userId === input.userId);
     assert.ok(row, `expected file row ${input.id} to exist`);
-    row.status = "uploaded";
+    row.status = "queued";
     row.errorCode = null;
     row.errorMessage = null;
     row.updatedAt = new Date();
@@ -725,6 +735,26 @@ class InMemoryFileRepository implements FileMetadataRepository {
       errorMessage: row.errorMessage,
     };
   }
+
+  async findFileReportForUser(input: {
+    id: string;
+    userId: string;
+  }): Promise<{
+    id: string;
+    status: "queued" | "processing" | "uploaded" | "succeeded" | "failed";
+    storageKeyReport: string | null;
+  } | null> {
+    const row = this.rows.find((candidate) => candidate.id === input.id && candidate.userId === input.userId);
+    if (!row) {
+      return null;
+    }
+
+    return {
+      id: row.id,
+      status: row.status,
+      storageKeyReport: row.storageKeyReport,
+    };
+  }
 }
 
 type PutObjectCall = {
@@ -736,11 +766,14 @@ type PutObjectCall = {
 class InMemoryFileStorage implements FileObjectStorage {
   putCalls: PutObjectCall[] = [];
   deleteCalls: string[] = [];
+  objects = new Map<string, Buffer>();
   failPutOnce: Error | null = null;
   failDeleteOnce: Error | null = null;
+  failGetOnce: Error | null = null;
 
   async putObject(key: string, body: Buffer, contentType: string): Promise<void> {
     this.putCalls.push({ key, body, contentType });
+    this.objects.set(key, body);
 
     if (this.failPutOnce) {
       const error = this.failPutOnce;
@@ -751,12 +784,83 @@ class InMemoryFileStorage implements FileObjectStorage {
 
   async deleteObject(key: string): Promise<void> {
     this.deleteCalls.push(key);
+    this.objects.delete(key);
 
     if (this.failDeleteOnce) {
       const error = this.failDeleteOnce;
       this.failDeleteOnce = null;
       throw error;
     }
+  }
+
+  async getObjectText(key: string): Promise<string> {
+    if (this.failGetOnce) {
+      const error = this.failGetOnce;
+      this.failGetOnce = null;
+      throw error;
+    }
+
+    const value = this.objects.get(key);
+    if (!value) {
+      throw new Error("s3_object_not_found");
+    }
+
+    return value.toString("utf8");
+  }
+
+  seedObjectText(key: string, value: string): void {
+    this.objects.set(key, Buffer.from(value, "utf8"));
+  }
+}
+
+type InMemoryProcessingJobRow = {
+  id: string;
+  fileId: string;
+  status: "queued" | "processing" | "succeeded" | "failed";
+  attempts: number;
+  maxAttempts: number;
+  nextRunAt: Date;
+};
+
+class InMemoryProcessingJobRepository implements ProcessingJobQueueRepository {
+  rows: InMemoryProcessingJobRow[] = [];
+  failEnqueueOnce: Error | null = null;
+  private counter = 0;
+
+  async enqueueForFile(input: { fileId: string }): Promise<void> {
+    if (this.failEnqueueOnce) {
+      const error = this.failEnqueueOnce;
+      this.failEnqueueOnce = null;
+      throw error;
+    }
+
+    if (this.rows.some((row) => row.fileId === input.fileId)) {
+      throw createPgDuplicateViolationError("processing_jobs_file_id_uidx");
+    }
+
+    this.rows.push({
+      id: `job_${++this.counter}`,
+      fileId: input.fileId,
+      status: "queued",
+      attempts: 0,
+      maxAttempts: 4,
+      nextRunAt: new Date(),
+    });
+  }
+
+  seedQueuedJob(input: { fileId: string }): void {
+    if (this.rows.some((row) => row.fileId === input.fileId)) {
+      return;
+    }
+
+    this.rows.push({
+      id: `job_${++this.counter}`,
+      fileId: input.fileId,
+      status: "queued",
+      attempts: 0,
+      maxAttempts: 4,
+      nextRunAt: new Date(),
+    });
   }
 }
 
@@ -787,6 +891,7 @@ function createHarness() {
   const reportShareRepository = new InMemoryReportShareRepository();
   const fileRepository = new InMemoryFileRepository();
   const fileStorage = new InMemoryFileStorage();
+  const processingJobRepository = new InMemoryProcessingJobRepository();
   const fileLogs: Array<Record<string, unknown>> = [];
   let tokenCounter = 0;
   let inviteTokenCounter = 0;
@@ -821,6 +926,7 @@ function createHarness() {
   });
   const fileUploadService = new FileUploadService({
     repository: fileRepository,
+    jobQueueRepository: processingJobRepository,
     storage: fileStorage,
     storageBucket: "gofunnel-test-bucket",
     randomId: () => testUuid(++fileIdCounter),
@@ -834,6 +940,10 @@ function createHarness() {
   const fileDetailsService = new FileDetailsService({
     repository: fileRepository,
   });
+  const fileReportService = new FileReportService({
+    repository: fileRepository,
+    storage: fileStorage,
+  });
 
   const server = createAuthHttpServer({
     authService,
@@ -844,6 +954,7 @@ function createHarness() {
     fileUploadService,
     fileListService,
     fileDetailsService,
+    fileReportService,
     siteOrigin: SITE_ORIGIN,
     secureCookies: false,
   });
@@ -856,6 +967,7 @@ function createHarness() {
     reportShareRepository,
     fileRepository,
     fileStorage,
+    processingJobRepository,
     fileLogs,
     authService,
     adminUserService,
@@ -975,7 +1087,8 @@ function seedUploadedFileRow(
     sizeBytes: number;
     createdAt: Date;
     updatedAt?: Date;
-    status?: "uploaded" | "processing" | "failed";
+    status?: "uploaded" | "queued" | "processing" | "succeeded" | "failed";
+    storageKeyReport?: string | null;
     errorCode?: string | null;
     errorMessage?: string | null;
   },
@@ -992,11 +1105,226 @@ function seedUploadedFileRow(
     mimeType: input.extension === "vtt" ? "text/vtt" : "text/plain",
     sizeBytes: input.sizeBytes,
     status,
+    storageKeyReport: input.storageKeyReport ?? null,
     errorCode: input.errorCode ?? null,
     errorMessage: input.errorMessage ?? null,
     createdAt,
     updatedAt: input.updatedAt ? new Date(input.updatedAt) : createdAt,
   });
+}
+
+type MockFetchExpectation = {
+  url: string | RegExp;
+  status: number;
+  body?: unknown;
+};
+
+type FakeListener = (event: {
+  target: unknown;
+  key?: string;
+  preventDefault: () => void;
+}) => void;
+
+class FakeHTMLElement {
+  id = "";
+  textContent = "";
+  hidden = false;
+  disabled = false;
+  value = "";
+  files: Array<{ name: string }> | null = null;
+  tabIndex = 0;
+  colSpan = 1;
+  style: Record<string, string> = {};
+  children: FakeHTMLElement[] = [];
+  private listeners = new Map<string, FakeListener[]>();
+
+  appendChild(child: FakeHTMLElement): FakeHTMLElement {
+    this.children.push(child);
+    return child;
+  }
+
+  replaceChildren(...children: FakeHTMLElement[]): void {
+    this.children = [...children];
+  }
+
+  addEventListener(type: string, listener: FakeListener): void {
+    const current = this.listeners.get(type) ?? [];
+    current.push(listener);
+    this.listeners.set(type, current);
+  }
+
+  trigger(type: string, event: Partial<Parameters<FakeListener>[0]> = {}): void {
+    const listeners = this.listeners.get(type) ?? [];
+    for (const listener of listeners) {
+      listener({
+        target: this,
+        preventDefault() {},
+        ...event,
+      });
+    }
+  }
+}
+
+class FakeHTMLFormElement extends FakeHTMLElement {}
+class FakeHTMLInputElement extends FakeHTMLElement {}
+class FakeHTMLButtonElement extends FakeHTMLElement {}
+class FakeHTMLTableSectionElement extends FakeHTMLElement {}
+
+class FakeDocument {
+  hidden = false;
+  private listeners = new Map<string, FakeListener[]>();
+
+  constructor(private readonly nodes: Map<string, FakeHTMLElement>) {}
+
+  getElementById(id: string): FakeHTMLElement | null {
+    return this.nodes.get(id) ?? null;
+  }
+
+  createElement(_tagName: string): FakeHTMLElement {
+    return new FakeHTMLElement();
+  }
+
+  addEventListener(type: string, listener: FakeListener): void {
+    const current = this.listeners.get(type) ?? [];
+    current.push(listener);
+    this.listeners.set(type, current);
+  }
+
+  trigger(type: string, event: Partial<Parameters<FakeListener>[0]> = {}): void {
+    const listeners = this.listeners.get(type) ?? [];
+    for (const listener of listeners) {
+      listener({
+        target: this,
+        preventDefault() {},
+        ...event,
+      });
+    }
+  }
+}
+
+class FakeFormData {
+  append(): void {}
+}
+
+function extractInlineScript(html: string): string {
+  const match = html.match(/<script>\s*([\s\S]*?)\s*<\/script>/);
+  assert.ok(match, "expected /app page to include an inline script");
+  const script = match[1];
+  assert.ok(script, "expected inline script body");
+  return script;
+}
+
+function createAppDashboardScriptHarness(input: {
+  html: string;
+  fetchExpectations: MockFetchExpectation[];
+}): {
+  filesBody: FakeHTMLTableSectionElement;
+  overlay: FakeHTMLElement;
+  overlayStatus: FakeHTMLElement;
+  overlayContent: FakeHTMLElement;
+  fetchCalls: string[];
+  remainingFetchExpectations: () => number;
+  clickFirstRow: () => void;
+  flush: () => Promise<void>;
+} {
+  const script = extractInlineScript(input.html);
+
+  const nodes = new Map<string, FakeHTMLElement>();
+  const statusNode = new FakeHTMLElement();
+  const uploadForm = new FakeHTMLFormElement();
+  const uploadInput = new FakeHTMLInputElement();
+  const uploadButton = new FakeHTMLButtonElement();
+  const refreshButton = new FakeHTMLButtonElement();
+  const loadMoreButton = new FakeHTMLButtonElement();
+  const filesBody = new FakeHTMLTableSectionElement();
+  const overlay = new FakeHTMLElement();
+  overlay.hidden = true;
+  const overlayClose = new FakeHTMLButtonElement();
+  const overlayStatus = new FakeHTMLElement();
+  const overlayContent = new FakeHTMLElement();
+
+  nodes.set("app-files-status", statusNode);
+  nodes.set("app-upload-form", uploadForm);
+  nodes.set("app-upload-input", uploadInput);
+  nodes.set("app-upload-button", uploadButton);
+  nodes.set("app-refresh-button", refreshButton);
+  nodes.set("app-load-more-button", loadMoreButton);
+  nodes.set("app-files-body", filesBody);
+  nodes.set("app-file-overlay", overlay);
+  nodes.set("app-file-overlay-close", overlayClose);
+  nodes.set("app-file-overlay-status", overlayStatus);
+  nodes.set("app-file-overlay-content", overlayContent);
+
+  const document = new FakeDocument(nodes);
+  const fetchCalls: string[] = [];
+  const fetchExpectations = [...input.fetchExpectations];
+
+  const fetchMock = async (
+    requestUrl: string,
+  ): Promise<{
+    ok: boolean;
+    status: number;
+    json: () => Promise<unknown>;
+  }> => {
+    fetchCalls.push(requestUrl);
+    const expected = fetchExpectations.shift();
+    assert.ok(expected, `unexpected fetch request: ${requestUrl}`);
+    if (typeof expected.url === "string") {
+      assert.equal(requestUrl, expected.url);
+    } else {
+      assert.match(requestUrl, expected.url);
+    }
+
+    return {
+      ok: expected.status >= 200 && expected.status < 300,
+      status: expected.status,
+      async json() {
+        return expected.body;
+      },
+    };
+  };
+
+  const setIntervalCalls: Array<() => void> = [];
+  const windowObject = {
+    setInterval(callback: () => void): number {
+      setIntervalCalls.push(callback);
+      return setIntervalCalls.length;
+    },
+  };
+
+  runInNewContext(script, {
+    console,
+    document,
+    window: windowObject,
+    fetch: fetchMock,
+    FormData: FakeFormData,
+    HTMLElement: FakeHTMLElement,
+    HTMLFormElement: FakeHTMLFormElement,
+    HTMLInputElement: FakeHTMLInputElement,
+    HTMLButtonElement: FakeHTMLButtonElement,
+    HTMLTableSectionElement: FakeHTMLTableSectionElement,
+  });
+
+  return {
+    filesBody,
+    overlay,
+    overlayStatus,
+    overlayContent,
+    fetchCalls,
+    remainingFetchExpectations: () => fetchExpectations.length,
+    clickFirstRow: () => {
+      const firstRow = filesBody.children[0];
+      assert.ok(firstRow, "expected at least one file row rendered");
+      firstRow.trigger("click");
+    },
+    flush: async () => {
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        await Promise.resolve();
+      }
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await Promise.resolve();
+    },
+  };
 }
 
 function startOfHour(value: Date): Date {
@@ -1148,9 +1476,147 @@ test("authenticated /app renders files dashboard UI scaffold", async () => {
   assert.match(html, /id="app-upload-input"/);
   assert.match(html, /accept="\.txt,\s*\.vtt"/);
   assert.match(html, /id="app-files-table"/);
-  assert.match(html, /Report not available yet \(Epic 3\)/);
+  assert.match(html, /id="app-file-overlay"/);
+  assert.match(html, /id="app-file-overlay-content"/);
   assert.match(html, /\/api\/files\/upload/);
   assert.match(html, /\/api\/files\?limit=20/);
+});
+
+test("app overlay renders report json for succeeded file status", async () => {
+  const harness = createHarness();
+  const { cookie } = seedAuthenticatedSession(harness, {
+    email: "member@example.com",
+  });
+  const { baseUrl } = await harness.start();
+
+  const appResponse = await fetch(`${baseUrl}/app`, {
+    headers: {
+      Cookie: cookie,
+    },
+  });
+  assert.equal(appResponse.status, 200);
+
+  const dashboard = createAppDashboardScriptHarness({
+    html: await appResponse.text(),
+    fetchExpectations: [
+      {
+        url: "/api/files?limit=20",
+        status: 200,
+        body: {
+          items: [
+            {
+              id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+              original_filename: "ready.txt",
+              created_at: "2026-02-27T14:00:00.000Z",
+              status: "succeeded",
+              size_bytes: 123,
+            },
+          ],
+          next_cursor: null,
+        },
+      },
+      {
+        url: "/api/files/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+        status: 200,
+        body: {
+          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+          status: "succeeded",
+          error_code: null,
+          error_message: null,
+        },
+      },
+      {
+        url: "/api/files/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1/report",
+        status: 200,
+        body: {
+          summary: "done",
+          confidence: 0.98,
+          raw_llm_output: "top-secret",
+          sections: {
+            outcome: "ok",
+            raw_llm_output: {
+              skipped: true,
+            },
+          },
+        },
+      },
+    ],
+  });
+
+  await dashboard.flush();
+  dashboard.clickFirstRow();
+  await dashboard.flush();
+
+  assert.equal(dashboard.overlay.hidden, false);
+  assert.equal(dashboard.overlayStatus.textContent, "");
+  assert.match(dashboard.overlayContent.textContent, /"summary":\s*"done"/);
+  assert.match(dashboard.overlayContent.textContent, /"confidence":\s*0.98/);
+  assert.match(dashboard.overlayContent.textContent, /"outcome":\s*"ok"/);
+  assert.doesNotMatch(dashboard.overlayContent.textContent, /raw_llm_output/);
+  assert.equal(dashboard.remainingFetchExpectations(), 0);
+});
+
+test("app overlay shows not ready message when report endpoint returns 409", async () => {
+  const harness = createHarness();
+  const { cookie } = seedAuthenticatedSession(harness, {
+    email: "member@example.com",
+  });
+  const { baseUrl } = await harness.start();
+
+  const appResponse = await fetch(`${baseUrl}/app`, {
+    headers: {
+      Cookie: cookie,
+    },
+  });
+  assert.equal(appResponse.status, 200);
+
+  const dashboard = createAppDashboardScriptHarness({
+    html: await appResponse.text(),
+    fetchExpectations: [
+      {
+        url: "/api/files?limit=20",
+        status: 200,
+        body: {
+          items: [
+            {
+              id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+              original_filename: "processing.txt",
+              created_at: "2026-02-27T14:00:00.000Z",
+              status: "succeeded",
+              size_bytes: 123,
+            },
+          ],
+          next_cursor: null,
+        },
+      },
+      {
+        url: "/api/files/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+        status: 200,
+        body: {
+          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+          status: "succeeded",
+          error_code: null,
+          error_message: null,
+        },
+      },
+      {
+        url: "/api/files/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1/report",
+        status: 409,
+        body: {
+          error: "report_not_ready",
+        },
+      },
+    ],
+  });
+
+  await dashboard.flush();
+  dashboard.clickFirstRow();
+  await dashboard.flush();
+
+  assert.equal(dashboard.overlay.hidden, false);
+  assert.equal(dashboard.overlayStatus.textContent, "Report is still processing");
+  assert.equal(dashboard.overlayContent.textContent, "");
+  assert.equal(dashboard.remainingFetchExpectations(), 0);
 });
 
 test("non-admin blocked from /admin/*", async () => {
@@ -2696,6 +3162,150 @@ test("files details returns owner metadata with expected fields", async () => {
   });
 });
 
+test("file report endpoint requires authenticated session", async () => {
+  const harness = createHarness();
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/files/11111111-1111-4111-8111-111111111111/report`);
+
+  assert.equal(response.status, 401);
+  assert.equal(await response.text(), "auth_required");
+});
+
+test("file report returns 404 when file belongs to another user", async () => {
+  const harness = createHarness();
+  const { user: owner } = seedAuthenticatedSession(harness, {
+    id: "11111111-1111-4111-8111-111111111111",
+    email: "owner@example.com",
+  });
+  const { cookie: otherCookie } = seedAuthenticatedSession(
+    harness,
+    {
+      id: "22222222-2222-4222-8222-222222222222",
+      email: "other@example.com",
+    },
+    "opaque_2",
+  );
+
+  seedUploadedFileRow(harness, {
+    id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+    userId: owner.id,
+    originalFilename: "owner.txt",
+    extension: "txt",
+    sizeBytes: 123,
+    status: "succeeded",
+    storageKeyReport: `users/${owner.id}/files/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1/report.json`,
+    createdAt: new Date("2026-02-27T12:00:00.000Z"),
+  });
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/files/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1/report`, {
+    headers: {
+      Cookie: otherCookie,
+    },
+  });
+
+  assert.equal(response.status, 404);
+  assert.equal(await response.text(), "Not Found");
+});
+
+test("file report returns 409 report_not_ready for owner when processing is not completed", async () => {
+  const harness = createHarness();
+  const { user: owner, cookie } = seedAuthenticatedSession(harness, {
+    id: "11111111-1111-4111-8111-111111111111",
+    email: "owner@example.com",
+  });
+
+  seedUploadedFileRow(harness, {
+    id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+    userId: owner.id,
+    originalFilename: "owner.txt",
+    extension: "txt",
+    sizeBytes: 123,
+    status: "processing",
+    createdAt: new Date("2026-02-27T12:00:00.000Z"),
+  });
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/files/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1/report`, {
+    headers: {
+      Cookie: cookie,
+    },
+  });
+
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), { error: "report_not_ready" });
+});
+
+test("file report returns report json for owner with application/json content type", async () => {
+  const harness = createHarness();
+  const { user: owner, cookie } = seedAuthenticatedSession(harness, {
+    id: "11111111-1111-4111-8111-111111111111",
+    email: "owner@example.com",
+  });
+  const reportKey = `users/${owner.id}/files/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1/report.json`;
+
+  seedUploadedFileRow(harness, {
+    id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+    userId: owner.id,
+    originalFilename: "owner.txt",
+    extension: "txt",
+    sizeBytes: 123,
+    status: "succeeded",
+    storageKeyReport: reportKey,
+    createdAt: new Date("2026-02-27T12:00:00.000Z"),
+  });
+  harness.fileStorage.seedObjectText(reportKey, JSON.stringify({
+    summary: "ok",
+    score: 0.9,
+  }));
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/files/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1/report`, {
+    headers: {
+      Cookie: cookie,
+    },
+  });
+
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type") ?? "", /application\/json/i);
+  assert.deepEqual(await response.json(), {
+    summary: "ok",
+    score: 0.9,
+  });
+});
+
+test("file report returns 500 report_fetch_failed when s3 read fails", async () => {
+  const harness = createHarness();
+  const { user: owner, cookie } = seedAuthenticatedSession(harness, {
+    id: "11111111-1111-4111-8111-111111111111",
+    email: "owner@example.com",
+  });
+  const reportKey = `users/${owner.id}/files/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1/report.json`;
+
+  seedUploadedFileRow(harness, {
+    id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+    userId: owner.id,
+    originalFilename: "owner.txt",
+    extension: "txt",
+    sizeBytes: 123,
+    status: "succeeded",
+    storageKeyReport: reportKey,
+    createdAt: new Date("2026-02-27T12:00:00.000Z"),
+  });
+  harness.fileStorage.failGetOnce = new Error("s3 timeout");
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/files/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1/report`, {
+    headers: {
+      Cookie: cookie,
+    },
+  });
+
+  assert.equal(response.status, 500);
+  assert.deepEqual(await response.json(), { error: "report_fetch_failed" });
+});
+
 test("upload endpoint requires authenticated session", async () => {
   const harness = createHarness();
   const { baseUrl } = await harness.start();
@@ -2751,14 +3361,14 @@ test("upload .txt success stores metadata and object", async () => {
   };
   assert.equal(json.ok, true);
   assert.match(json.file_id, /^[0-9a-f-]{36}$/);
-  assert.equal(json.status, "uploaded");
+  assert.equal(json.status, "queued");
 
   assert.equal(harness.fileRepository.rows.length, 1);
   const row = harness.fileRepository.rows[0];
   assert.ok(row);
   assert.equal(row.id, json.file_id);
   assert.equal(row.userId, user.id);
-  assert.equal(row.status, "uploaded");
+  assert.equal(row.status, "queued");
   assert.equal(row.storageBucket, "gofunnel-test-bucket");
   assert.equal(row.originalFilename, "notes.txt");
   assert.equal(row.extension, "txt");
@@ -2775,6 +3385,12 @@ test("upload .txt success stores metadata and object", async () => {
   assert.equal(putCall.key, row.storageKeyOriginal);
   assert.equal(putCall.contentType, "text/plain");
   assert.deepEqual(putCall.body, payload);
+
+  const job = harness.processingJobRepository.rows.find((candidate) => candidate.fileId === row.id);
+  assert.ok(job);
+  assert.equal(job.status, "queued");
+  assert.equal(job.attempts, 0);
+  assert.equal(job.maxAttempts, 4);
 });
 
 test("upload success is visible in files list response", async () => {
@@ -2819,13 +3435,55 @@ test("upload success is visible in files list response", async () => {
     original_filename: "visible.txt",
     extension: "txt",
     size_bytes: Buffer.byteLength("visible-content"),
-    status: "uploaded",
+    status: "queued",
     created_at: listPayload.items[0]?.created_at,
     updated_at: listPayload.items[0]?.updated_at,
   });
   assert.equal(typeof listPayload.items[0]?.created_at, "string");
   assert.equal(typeof listPayload.items[0]?.updated_at, "string");
   assert.equal(listPayload.next_cursor, null);
+});
+
+test("upload handles duplicate enqueue idempotently and does not create extra jobs", async () => {
+  const harness = createHarness();
+  const { cookie } = seedAuthenticatedSession(harness, {
+    id: "11111111-1111-4111-8111-111111111111",
+    email: "owner@example.com",
+  });
+  const anticipatedFileId = testUuid(1);
+  harness.processingJobRepository.seedQueuedJob({ fileId: anticipatedFileId });
+  const { baseUrl } = await harness.start();
+  const multipart = makeMultipartUploadBody({
+    filename: "idempotent.txt",
+    content: "idempotent-content",
+    contentType: "text/plain",
+  });
+
+  const response = await fetch(`${baseUrl}/api/files/upload`, {
+    method: "POST",
+    headers: {
+      Origin: SITE_ORIGIN,
+      Cookie: cookie,
+      "Content-Type": multipart.contentType,
+    },
+    body: multipart.body.toString("utf8"),
+  });
+
+  assert.equal(response.status, 200);
+  const json = (await response.json()) as {
+    ok: boolean;
+    file_id: string;
+    status: string;
+  };
+  assert.equal(json.ok, true);
+  assert.equal(json.file_id, anticipatedFileId);
+  assert.equal(json.status, "queued");
+  assert.equal(
+    harness.processingJobRepository.rows.filter((row) => row.fileId === anticipatedFileId).length,
+    1,
+  );
+  assert.equal(harness.fileRepository.rows.length, 1);
+  assert.equal(harness.fileRepository.rows[0]?.status, "queued");
 });
 
 test("upload rejects unsupported extension without DB or S3 side effects", async () => {
@@ -2884,12 +3542,12 @@ test("upload rejects oversize payload with 413 and no writes", async () => {
   assert.equal(harness.fileStorage.putCalls.length, 0);
 });
 
-test("db failure after successful s3 put triggers delete compensation and orphan log on delete failure", async () => {
+test("queue finalize failure after successful s3 put triggers delete compensation and orphan logs", async () => {
   const harness = createHarness();
   const { user, cookie } = seedAuthenticatedSession(harness, {
     id: "11111111-1111-4111-8111-111111111111",
   });
-  harness.fileRepository.failMarkUploadedOnce = new Error("write conflict");
+  harness.fileRepository.failMarkQueuedOnce = new Error("write conflict");
   harness.fileStorage.failDeleteOnce = new Error("delete unavailable");
   const { baseUrl } = await harness.start();
   const multipart = makeMultipartUploadBody({
@@ -2916,8 +3574,14 @@ test("db failure after successful s3 put triggers delete compensation and orphan
   const row = harness.fileRepository.rows[0];
   assert.ok(row);
   assert.equal(row.status, "failed");
-  assert.equal(row.errorCode, "db_finalize_failed");
+  assert.equal(row.errorCode, "enqueue_failed");
   assert.equal(harness.fileStorage.deleteCalls[0], row.storageKeyOriginal);
+
+  const enqueueOrphanLog = harness.fileLogs.find((entry) => entry.event === "orphan_file_without_job");
+  assert.ok(enqueueOrphanLog);
+  assert.equal(enqueueOrphanLog.userId, user.id);
+  assert.equal(enqueueOrphanLog.fileId, row.id);
+  assert.equal(enqueueOrphanLog.key, row.storageKeyOriginal);
 
   const orphanLog = harness.fileLogs.find((entry) => entry.event === "orphan_s3_object");
   assert.ok(orphanLog);
@@ -2960,3 +3624,54 @@ test("s3 put failure after db insert updates file row status to failed", async (
   assert.equal(row.errorCode, "s3_put_failed");
   assert.match(row.errorMessage ?? "", /s3 timeout/i);
 });
+
+test("enqueue failure after successful upload marks file failed and attempts s3 delete", async () => {
+  const harness = createHarness();
+  const { user, cookie } = seedAuthenticatedSession(harness, {
+    id: "11111111-1111-4111-8111-111111111111",
+  });
+  harness.processingJobRepository.failEnqueueOnce = new Error("queue unavailable");
+  const { baseUrl } = await harness.start();
+  const multipart = makeMultipartUploadBody({
+    filename: "to-queue.txt",
+    content: "payload",
+    contentType: "text/plain",
+  });
+
+  const response = await fetch(`${baseUrl}/api/files/upload`, {
+    method: "POST",
+    headers: {
+      Origin: SITE_ORIGIN,
+      Cookie: cookie,
+      "Content-Type": multipart.contentType,
+    },
+    body: multipart.body.toString("utf8"),
+  });
+
+  assert.equal(response.status, 500);
+  assert.deepEqual(await response.json(), { error: "upload_failed" });
+  assert.equal(harness.fileRepository.rows.length, 1);
+  assert.equal(harness.processingJobRepository.rows.length, 0);
+  assert.equal(harness.fileStorage.putCalls.length, 1);
+  assert.equal(harness.fileStorage.deleteCalls.length, 1);
+  const row = harness.fileRepository.rows[0];
+  assert.ok(row);
+  assert.equal(row.status, "failed");
+  assert.equal(row.errorCode, "enqueue_failed");
+  assert.match(row.errorMessage ?? "", /queue unavailable/i);
+  assert.equal(harness.fileStorage.deleteCalls[0], row.storageKeyOriginal);
+
+  const orphanLog = harness.fileLogs.find((entry) => entry.event === "orphan_file_without_job");
+  assert.ok(orphanLog);
+  assert.equal(orphanLog.userId, user.id);
+  assert.equal(orphanLog.fileId, row.id);
+  assert.equal(orphanLog.key, row.storageKeyOriginal);
+});
+
+function createPgDuplicateViolationError(constraintName: string): Error & { code: string; constraint: string } {
+  const error = new Error("duplicate key value violates unique constraint");
+  return Object.assign(error, {
+    code: "23505",
+    constraint: constraintName,
+  });
+}

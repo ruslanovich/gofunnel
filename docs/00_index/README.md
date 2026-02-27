@@ -32,10 +32,19 @@
 ## Recent planning artifacts (2026-02-27)
 
 - Epic 2 execution plan: `docs/03_execution_plans/2026-02-27_epic-2-upload-files.md`
+- Epic 3 execution plan: `docs/03_execution_plans/2026-02-27_epic-3-processing-reports.md`
+- Epic 3 PR-3.1 execution plan: `docs/03_execution_plans/2026-02-27_pr-3-1-llm-adapter-ajv-validation.md`
+- Epic 3 PR-3.1b execution plan (OpenAI provider default): `docs/03_execution_plans/2026-02-27_pr-3-1b-openai-provider-gpt5mini.md`
+- Epic 3 PR-3.2 execution plan: `docs/03_execution_plans/2026-02-27_pr-3-2-worker-pipeline-s3-llm-validate-s3-db.md`
+- Epic 3 PR-3.3 execution plan: `docs/03_execution_plans/2026-02-27_pr-3-3-get-report-endpoint.md`
 - DX CI node dependency install plan: `docs/03_execution_plans/2026-02-27_pr-dx-ci-node-deps-install.md`
 - ADR-0005 S3 client + Yandex config: `docs/05_decisions/2026-02-27_adr-0005_s3-client-yandex-object-storage-config.md`
 - ADR-0006 Upload transport strategy: `docs/05_decisions/2026-02-27_adr-0006_upload-transport-strategy.md`
 - ADR-0007 Files pagination strategy: `docs/05_decisions/2026-02-27_adr-0007_files-list-pagination-strategy.md`
+- ADR-0008 Job queue choice: `docs/05_decisions/2026-02-27_adr-0008_job-queue-choice.md`
+- ADR-0009 Report storage model: `docs/05_decisions/2026-02-27_adr-0009_report-storage-model.md`
+- ADR-0010 Retry/backoff policy: `docs/05_decisions/2026-02-27_adr-0010_retry-backoff-policy.md`
+- ADR-0011 LLM + schema validation integration: `docs/05_decisions/2026-02-27_adr-0011_llm-schema-validation-integration.md`
 
 ## Важные корневые документы
 

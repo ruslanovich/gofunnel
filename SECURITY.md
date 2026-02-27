@@ -294,3 +294,62 @@ MVP strategy for Epic 1 auth/admin POST endpoints (PR-2.1):
   - storage internals (`storage_bucket`, `storage_key_original`) remain excluded from response
   - `error_message` in response is sanitized (whitespace-collapsed + bounded length); for non-`failed` statuses, `error_code/error_message` are `null`
   - no S3 credentials/secrets are exposed by details endpoint.
+
+## Epic 3 PR-1.1 implemented controls (queue schema + report metadata)
+
+- Added internal-only table `processing_jobs` for scheduling/worker coordination:
+  - table is not exposed through public HTTP APIs or UI payloads
+  - it stores lock/attempt/error metadata required for reliable worker operation, not user-facing status
+- Ownership boundary for report access remains unchanged:
+  - report retrieval contract stays owner-scoped (`/api/files/:id/report` in a later Epic 3 PR)
+  - non-owner report access must stay masked as `404` (no existence disclosure)
+- Added report metadata columns in `files` without moving artifact bytes into Postgres:
+  - only storage keys/versions/timestamps/attempt counters are persisted
+  - report body and raw LLM output remain in S3 object storage under owner-scoped keys
+
+## Epic 3 PR-3.1 implemented controls (LLM adapter + schema validation only)
+
+- Added server-side LLM adapter boundary with explicit secret handling:
+  - provider credentials are loaded only from env (`LLM_API_KEY`) and never hardcoded
+  - provider/model selection is env-driven (`LLM_PROVIDER`, `LLM_MODEL`) with secure defaults for non-test runtime
+  - production boot guardrails reject `LLM_PROVIDER=fake` and reject missing `LLM_API_KEY`
+- Raw LLM output sensitivity policy for this stage:
+  - adapter returns `rawText` for internal processing only
+  - API keys, full transcript text, and full raw LLM output are forbidden in runtime logs
+  - full raw output must not be written to application logs
+  - diagnostic surfaces should use sanitized summaries/error codes instead of full payload dumps
+- Added strict schema-validation gate before report acceptance:
+  - validator emits bounded, sanitized error metadata for logs
+
+## Epic 3 PR-3.2 implemented controls (worker pipeline integration)
+
+- Processing artifacts stay storage-scoped and owner-partitioned:
+  - original transcript key: `users/<userId>/files/<fileId>/original.<ext>`
+  - report artifact key: `users/<userId>/files/<fileId>/report.json`
+  - raw invalid-model-output key: `users/<userId>/files/<fileId>/raw_llm_output.json`
+- Raw LLM output handling:
+  - on schema validation failure, worker persists raw output artifact for diagnostics and finalizes job/file as failed with `schema_validation_failed`
+  - raw payload is stored in S3 only; it is not copied into Postgres large text fields
+  - runtime logs remain sanitized and bounded; full raw payload is not emitted to logs
+- Report success boundary:
+  - `files.status='succeeded'` is finalized only after `report.json` write and metadata update (`storage_key_report`, `prompt_version`, `schema_version`)
+  - this prevents exposing successful status when report artifact is missing
+- Orphan risk control after partial failure:
+  - if report write succeeds but DB metadata update fails, worker executes best-effort report delete
+  - on cleanup failure, structured `orphan_report_object` event is emitted for operational cleanup
+
+## Epic 3 PR-3.3 implemented controls (owner-only report endpoint)
+
+- Added authenticated report retrieval endpoint:
+  - `GET /api/files/:id/report` requires valid session (`401 auth_required` otherwise)
+  - `:id` must be canonical UUID, otherwise endpoint returns `400 invalid_id`
+- Owner-only access with existence masking:
+  - owner-scoped lookup is enforced by `(files.id, files.user_id=<session.user.id>)`
+  - missing and non-owned files both return `404 Not Found` (no cross-tenant existence disclosure)
+- Report readiness boundary:
+  - for owner-owned file, if `files.status != 'succeeded'` or `storage_key_report` is absent, endpoint returns `409 { "error": "report_not_ready" }`
+  - this prevents exposing partial/unfinished processing artifacts as completed report content
+- Sensitive content handling:
+  - endpoint returns report payload as JSON (`application/json`) without embedding report content into logs
+  - on fetch failure from storage, response is sanitized to `500 { "error": "report_fetch_failed" }`
+  - structured error log includes `fileId` and sanitized error metadata only (no report body)

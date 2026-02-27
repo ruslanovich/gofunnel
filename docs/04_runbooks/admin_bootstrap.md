@@ -34,13 +34,19 @@ DATABASE_URL="postgres://user:password@localhost:5432/app_db" npm run db:migrate
 DATABASE_URL="postgres://user:password@localhost:5432/app_db" npm run db:migrate:status
 ```
 
-4. Bootstrap first admin (safe password input via stdin, avoids command history args):
+4. Verify Epic 3 processing schema (optional; checks required columns/indexes/constraints):
+
+```bash
+DATABASE_URL="postgres://user:password@localhost:5432/app_db" npm run db:verify:processing
+```
+
+5. Bootstrap first admin (safe password input via stdin, avoids command history args):
 
 ```bash
 printf '%s' 'ReplaceWithStrongPassword123!' | DATABASE_URL="postgres://user:password@localhost:5432/app_db" npm run bootstrap:admin -- --email admin@example.com --password-stdin
 ```
 
-5. Verify admin row exists (smoke check):
+6. Verify admin row exists (smoke check):
 
 ```bash
 psql "postgres://user:password@localhost:5432/app_db" -c "SELECT email, role, status, password_hash IS NOT NULL AS has_password_hash FROM users WHERE email = 'admin@example.com';"

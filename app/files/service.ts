@@ -3,11 +3,14 @@ import { randomUUID } from "node:crypto";
 import {
   ALLOWED_FILE_EXTENSIONS,
   type FileDetailsItem,
+  type FileReportItem,
+  type FileReportStorage,
   type AllowedFileExtension,
   type FileListCursor,
   type FileListItem,
   type FileMetadataRepository,
   type FileObjectStorage,
+  type ProcessingJobQueueRepository,
   FILE_UPLOAD_MAX_BYTES,
 } from "./contracts.js";
 
@@ -52,6 +55,7 @@ export class FileListValidationError extends Error {
 
 export type FileUploadServiceDeps = {
   repository: FileMetadataRepository;
+  jobQueueRepository: ProcessingJobQueueRepository;
   storage: FileObjectStorage;
   storageBucket: string;
   randomId?: () => string;
@@ -69,7 +73,7 @@ export type UploadFileInput = {
 export type UploadFileResult = {
   fileId: string;
   storageKeyOriginal: string;
-  status: "uploaded";
+  status: "queued";
 };
 
 export class FileUploadService {
@@ -118,14 +122,48 @@ export class FileUploadService {
     }
 
     try {
-      await this.deps.repository.markFileUploaded({
+      try {
+        await this.deps.jobQueueRepository.enqueueForFile({
+          fileId,
+        });
+      } catch (error) {
+        if (!isUniqueViolation(error)) {
+          throw error;
+        }
+      }
+
+      await this.deps.repository.markFileQueued({
         id: fileId,
         userId: input.userId,
       });
     } catch (error) {
+      let deleteFailed = false;
+      let deleteErrorMessage: string | null = null;
       try {
         await this.deps.storage.deleteObject(storageKeyOriginal);
-      } catch {
+      } catch (deleteError) {
+        deleteFailed = true;
+        deleteErrorMessage = sanitizeErrorMessage(deleteError);
+      }
+
+      const sanitizedError = sanitizeErrorMessage(error);
+      await this.markFailedBestEffort({
+        id: fileId,
+        userId: input.userId,
+        code: "enqueue_failed",
+        message: sanitizedError,
+      });
+
+      this.deps.logEvent?.("orphan_file_without_job", {
+        userId: input.userId,
+        fileId,
+        key: storageKeyOriginal,
+        enqueueError: sanitizedError,
+        deleteFailed,
+        ...(deleteErrorMessage ? { deleteError: deleteErrorMessage } : {}),
+      });
+
+      if (deleteFailed) {
         this.deps.logEvent?.("orphan_s3_object", {
           userId: input.userId,
           fileId,
@@ -133,19 +171,13 @@ export class FileUploadService {
         });
       }
 
-      await this.markFailedBestEffort({
-        id: fileId,
-        userId: input.userId,
-        code: "db_finalize_failed",
-        message: sanitizeErrorMessage(error),
-      });
       throw new FileUploadError();
     }
 
     return {
       fileId,
       storageKeyOriginal,
-      status: "uploaded",
+      status: "queued",
     };
   }
 
@@ -228,6 +260,65 @@ export class FileDetailsService {
   }
 }
 
+export class FileReportError extends Error {
+  readonly httpStatus: 409 | 500;
+  readonly code: "report_not_ready" | "report_fetch_failed";
+  readonly details: string | null;
+
+  constructor(code: "report_not_ready" | "report_fetch_failed", details: string | null = null) {
+    super(code);
+    this.name = "FileReportError";
+    this.code = code;
+    this.httpStatus = code === "report_not_ready" ? 409 : 500;
+    this.details = details;
+  }
+}
+
+export type FileReportServiceDeps = {
+  repository: FileMetadataRepository;
+  storage: FileReportStorage;
+};
+
+export type GetFileReportForUserInput = {
+  userId: string;
+  id: string;
+};
+
+export class FileReportService {
+  constructor(private readonly deps: FileReportServiceDeps) {}
+
+  async getForUser(input: GetFileReportForUserInput): Promise<(FileReportItem & { report: unknown }) | null> {
+    const file = await this.deps.repository.findFileReportForUser({
+      id: input.id,
+      userId: input.userId,
+    });
+    if (!file) {
+      return null;
+    }
+
+    if (file.status !== "succeeded" || file.storageKeyReport === null) {
+      throw new FileReportError("report_not_ready");
+    }
+
+    let reportText: string;
+    try {
+      reportText = await this.deps.storage.getObjectText(file.storageKeyReport);
+    } catch (error) {
+      throw new FileReportError("report_fetch_failed", sanitizeErrorMessage(error));
+    }
+
+    try {
+      const report = JSON.parse(reportText) as unknown;
+      return {
+        ...file,
+        report,
+      };
+    } catch (error) {
+      throw new FileReportError("report_fetch_failed", sanitizeErrorMessage(error));
+    }
+  }
+}
+
 export function buildOriginalStorageKey(
   userId: string,
   fileId: string,
@@ -275,6 +366,15 @@ function sanitizeErrorMessage(error: unknown): string {
     return "unknown_error";
   }
   return collapsed.slice(0, 280);
+}
+
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === "object"
+    && error !== null
+    && "code" in error
+    && (error as { code?: string }).code === "23505"
+  );
 }
 
 export function normalizeListLimit(input: number | null | undefined): number {

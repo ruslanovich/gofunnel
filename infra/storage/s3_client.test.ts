@@ -23,10 +23,17 @@ type TestCommand = {
 class FakeS3Client {
   readonly sent: TestCommand[] = [];
 
-  async send(command: TestCommand): Promise<{ ContentLength?: number }> {
+  async send(command: TestCommand): Promise<{ ContentLength?: number; Body?: { transformToString: () => Promise<string> } }> {
     this.sent.push(command);
     if (command.constructor.name === "HeadObjectCommand") {
       return { ContentLength: 5 };
+    }
+    if (command.constructor.name === "GetObjectCommand") {
+      return {
+        Body: {
+          transformToString: async () => "hello",
+        },
+      };
     }
     return {};
   }
@@ -74,7 +81,7 @@ test("buildS3ClientConfig includes endpoint, region and forcePathStyle", () => {
   });
 });
 
-test("S3 storage service sends put, delete and head commands using configured bucket", async () => {
+test("S3 storage service sends put, delete, get and head commands using configured bucket", async () => {
   const client = new FakeS3Client();
   const service = createS3StorageService({
     env: BASE_ENV,
@@ -86,12 +93,14 @@ test("S3 storage service sends put, delete and head commands using configured bu
 
   await service.putObject(key, body, "text/plain");
   await service.deleteObject(key);
+  const text = await service.getObjectText(key);
   const head = await service.headObject(key);
 
+  assert.equal(text, "hello");
   assert.equal(head.ContentLength, 5);
   assert.deepEqual(
     client.sent.map((command) => command.constructor.name),
-    ["PutObjectCommand", "DeleteObjectCommand", "HeadObjectCommand"],
+    ["PutObjectCommand", "DeleteObjectCommand", "GetObjectCommand", "HeadObjectCommand"],
   );
   assert.deepEqual(client.sent[0]?.input, {
     Bucket: BASE_ENV.S3_BUCKET,
@@ -104,6 +113,10 @@ test("S3 storage service sends put, delete and head commands using configured bu
     Key: key,
   });
   assert.deepEqual(client.sent[2]?.input, {
+    Bucket: BASE_ENV.S3_BUCKET,
+    Key: key,
+  });
+  assert.deepEqual(client.sent[3]?.input, {
     Bucket: BASE_ENV.S3_BUCKET,
     Key: key,
   });

@@ -7,16 +7,20 @@
     "db:migrate": "tsx interfaces/cli/db_migrate.ts up",
     "db:rollback": "tsx interfaces/cli/db_migrate.ts down",
     "db:migrate:status": "tsx interfaces/cli/db_migrate.ts status",
+    "db:verify:processing": "tsx interfaces/cli/db_verify_processing.ts",
     "bootstrap:admin": "tsx interfaces/cli/bootstrap_admin.ts",
     "http:start": "tsx interfaces/http/server_main.ts",
+    "worker:start": "tsx interfaces/cli/worker_start.ts",
     "test": "./scripts/test.sh",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.999.0",
     "@fastify/busboy": "^3.2.0",
+    "ajv": "^8.18.0",
     "argon2": "^0.44.0",
     "dotenv": "^16.6.1",
+    "openai": "^6.25.0",
     "pg": "^8.16.3"
   },
   "devDependencies": {

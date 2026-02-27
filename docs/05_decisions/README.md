@@ -26,3 +26,10 @@
 - `docs/05_decisions/2026-02-27_adr-0005_s3-client-yandex-object-storage-config.md`
 - `docs/05_decisions/2026-02-27_adr-0006_upload-transport-strategy.md`
 - `docs/05_decisions/2026-02-27_adr-0007_files-list-pagination-strategy.md`
+
+Текущие ADR (Epic 3):
+
+- `docs/05_decisions/2026-02-27_adr-0008_job-queue-choice.md`
+- `docs/05_decisions/2026-02-27_adr-0009_report-storage-model.md`
+- `docs/05_decisions/2026-02-27_adr-0010_retry-backoff-policy.md`
+- `docs/05_decisions/2026-02-27_adr-0011_llm-schema-validation-integration.md`

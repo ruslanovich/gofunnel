@@ -13,6 +13,8 @@ import { AuthError, AuthService } from "../../app/auth/service.js";
 import { buildLoginRedirectLocation, sanitizeNextPath } from "../../app/auth/redirects.js";
 import {
   FileDetailsService,
+  FileReportError,
+  FileReportService,
   FileListService,
   FileListValidationError,
   FILE_UPLOAD_MAX_BYTES,
@@ -37,6 +39,7 @@ import { PostgresAuthRepository } from "../../infra/auth/postgres_auth_repositor
 import { createPgPool } from "../../infra/db/client.js";
 import { PostgresFileRepository } from "../../infra/files/postgres_file_repository.js";
 import { PostgresInviteRepository } from "../../infra/invites/postgres_invite_repository.js";
+import { PostgresProcessingJobRepository } from "../../infra/processing/postgres_processing_job_repository.js";
 import { hashOpaqueToken } from "../../infra/security/token_hash.js";
 import { PostgresReportShareRepository } from "../../infra/shares/postgres_report_share_repository.js";
 import { createS3StorageService, loadS3StorageEnv } from "../../infra/storage/s3_client.js";
@@ -54,6 +57,7 @@ export type AuthHttpServerDeps = {
   fileUploadService: FileUploadService;
   fileListService: FileListService;
   fileDetailsService: FileDetailsService;
+  fileReportService: FileReportService;
   siteOrigin: string;
   secureCookies: boolean;
 };
@@ -81,6 +85,7 @@ export function createDefaultAuthHttpServer(config: HttpServerConfig = loadHttpS
   const inviteRepository = new PostgresInviteRepository(pool);
   const reportShareRepository = new PostgresReportShareRepository(pool);
   const fileRepository = new PostgresFileRepository(pool);
+  const processingJobRepository = new PostgresProcessingJobRepository(pool);
   const s3Env = loadS3StorageEnv(process.env);
   const s3Storage = createS3StorageService();
   const authService = new AuthService({ repository: authRepository });
@@ -99,6 +104,7 @@ export function createDefaultAuthHttpServer(config: HttpServerConfig = loadHttpS
   });
   const fileUploadService = new FileUploadService({
     repository: fileRepository,
+    jobQueueRepository: processingJobRepository,
     storage: s3Storage,
     storageBucket: s3Env.S3_BUCKET,
     logEvent: logEvent,
@@ -109,6 +115,10 @@ export function createDefaultAuthHttpServer(config: HttpServerConfig = loadHttpS
   const fileDetailsService = new FileDetailsService({
     repository: fileRepository,
   });
+  const fileReportService = new FileReportService({
+    repository: fileRepository,
+    storage: s3Storage,
+  });
   const server = createAuthHttpServer({
     authService,
     accessRequestService,
@@ -118,6 +128,7 @@ export function createDefaultAuthHttpServer(config: HttpServerConfig = loadHttpS
     fileUploadService,
     fileListService,
     fileDetailsService,
+    fileReportService,
     siteOrigin: config.siteOrigin,
     secureCookies: config.secureCookies,
   });
@@ -409,6 +420,51 @@ async function handleRequest(
   }
 
   if (method === "GET" && pathname.startsWith("/api/files/")) {
+    const reportFileId = parseFileIdFromReportPath(pathname);
+    if (reportFileId) {
+      const session = await tryGetSession(req, deps.authService);
+      if (!session) {
+        sendText(res, 401, "auth_required");
+        return;
+      }
+
+      if (!isCanonicalUuid(reportFileId)) {
+        sendJson(res, 400, { error: "invalid_id" });
+        return;
+      }
+
+      try {
+        const report = await deps.fileReportService.getForUser({
+          id: reportFileId,
+          userId: session.user.id,
+        });
+
+        if (!report) {
+          sendText(res, 404, "Not Found");
+          return;
+        }
+
+        sendJson(res, 200, report.report);
+        return;
+      } catch (error) {
+        if (error instanceof FileReportError) {
+          if (error.code === "report_not_ready") {
+            sendJson(res, error.httpStatus, { error: error.code });
+            return;
+          }
+
+          logEvent("report_fetch_failed", {
+            fileId: reportFileId,
+            error: sanitizeFileErrorMessageForResponse(error.details) ?? error.code,
+          });
+          sendJson(res, error.httpStatus, { error: error.code });
+          return;
+        }
+
+        throw error;
+      }
+    }
+
     const fileId = parseFileIdFromPath(pathname);
     if (!fileId) {
       sendText(res, 404, "Not Found");
@@ -1585,7 +1641,6 @@ function renderAppDashboardPage(session: AuthenticatedSession): string {
         <h2 id="app-file-overlay-title">File metadata</h2>
         <p id="app-file-overlay-status" aria-live="polite"></p>
         <pre id="app-file-overlay-content" style="white-space:pre-wrap;"></pre>
-        <p>Report not available yet (Epic 3)</p>
       </div>
     </div>
 
@@ -1693,6 +1748,36 @@ function renderAppDashboardPage(session: AuthenticatedSession): string {
           loadMoreButton.disabled = isLoadingFirstPage || isLoadingMore || isUploading || nextCursor === null;
         }
 
+        function sanitizeReportPayload(value) {
+          if (Array.isArray(value)) {
+            return value.map((item) => sanitizeReportPayload(item));
+          }
+          if (!value || typeof value !== "object") {
+            return value;
+          }
+
+          const source = value;
+          const sanitized = {};
+          for (const key of Object.keys(source)) {
+            if (key === "raw_llm_output") {
+              continue;
+            }
+            sanitized[key] = sanitizeReportPayload(source[key]);
+          }
+          return sanitized;
+        }
+
+        function formatErrorDetails(payload) {
+          const details = [];
+          if (payload && typeof payload.error_code === "string" && payload.error_code.trim() !== "") {
+            details.push("code: " + payload.error_code);
+          }
+          if (payload && typeof payload.error_message === "string" && payload.error_message.trim() !== "") {
+            details.push("message: " + payload.error_message);
+          }
+          return details.length > 0 ? details.join("\\n") : "No additional error details.";
+        }
+
         async function fetchListPage(cursor) {
           const url = cursor
             ? LIST_FIRST_PAGE_URL + "&cursor=" + encodeURIComponent(cursor)
@@ -1737,10 +1822,68 @@ function renderAppDashboardPage(session: AuthenticatedSession): string {
             }
 
             const payload = await response.json();
-            overlayStatus.textContent = "";
-            overlayContent.textContent = JSON.stringify(payload, null, 2);
+            const status = payload && typeof payload.status === "string" ? payload.status : "";
+
+            if (status === "failed") {
+              overlayStatus.textContent = "Processing failed.";
+              overlayContent.textContent = formatErrorDetails(payload);
+              return;
+            }
+
+            if (status !== "succeeded") {
+              overlayStatus.textContent = "Report is still processing";
+              overlayContent.textContent = "";
+              return;
+            }
+
+            overlayStatus.textContent = "Loading report...";
+            try {
+              const reportResponse = await fetch(
+                "/api/files/" + encodeURIComponent(fileId) + "/report",
+                {
+                  headers: {
+                    Accept: "application/json",
+                  },
+                },
+              );
+
+              if (reportResponse.status === 409) {
+                let reportPayload = null;
+                try {
+                  reportPayload = await reportResponse.json();
+                } catch {}
+
+                const reportError =
+                  reportPayload && typeof reportPayload.error === "string" ? reportPayload.error : "";
+                if (reportError === "report_not_ready") {
+                  overlayStatus.textContent = "Report is still processing";
+                  overlayContent.textContent = "";
+                  return;
+                }
+              }
+
+              if (reportResponse.status === 404) {
+                overlayStatus.textContent = "File not found.";
+                overlayContent.textContent = "";
+                return;
+              }
+
+              if (!reportResponse.ok) {
+                overlayStatus.textContent = "Unable to load report.";
+                overlayContent.textContent = "";
+                return;
+              }
+
+              const reportPayload = await reportResponse.json();
+              overlayStatus.textContent = "";
+              overlayContent.textContent = JSON.stringify(sanitizeReportPayload(reportPayload), null, 2);
+            } catch {
+              overlayStatus.textContent = "Unable to load report.";
+              overlayContent.textContent = "";
+            }
           } catch {
             overlayStatus.textContent = "Unable to load file metadata.";
+            overlayContent.textContent = "";
           }
         }
 
@@ -2105,6 +2248,26 @@ function parseShareTokenFromPath(pathname: string): string | null {
 
 function parseFileIdFromPath(pathname: string): string | null {
   return parseSinglePathToken(pathname, "/api/files/");
+}
+
+function parseFileIdFromReportPath(pathname: string): string | null {
+  const prefix = "/api/files/";
+  const suffix = "/report";
+  if (!pathname.startsWith(prefix) || !pathname.endsWith(suffix)) {
+    return null;
+  }
+
+  const rawToken = pathname.slice(prefix.length, pathname.length - suffix.length);
+  if (!rawToken || rawToken.includes("/")) {
+    return null;
+  }
+
+  try {
+    const decoded = decodeURIComponent(rawToken).trim();
+    return decoded || null;
+  } catch {
+    return null;
+  }
 }
 
 function parseSinglePathToken(pathname: string, prefix: string): string | null {
