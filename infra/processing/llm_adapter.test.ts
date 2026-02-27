@@ -243,6 +243,22 @@ test("openai provider analyze uses structured output request and returns parsed 
   });
 
   assert.equal(calls.length, 1);
+  const structuredRequest = calls[0] as {
+    text?: {
+      format?: {
+        type?: unknown;
+        name?: unknown;
+        strict?: unknown;
+        schema?: unknown;
+        json_schema?: unknown;
+      };
+    };
+  };
+  assert.equal(structuredRequest.text?.format?.type, "json_schema");
+  assert.equal(structuredRequest.text?.format?.name, "report_v1");
+  assert.equal(structuredRequest.text?.format?.strict, true);
+  assert.ok(structuredRequest.text?.format?.schema);
+  assert.equal(structuredRequest.text?.format?.json_schema, undefined);
   assert.equal(result.rawText, "{\"overview\":\"ok\"}");
   assert.deepEqual(result.parsedJson, { overview: "ok" });
 });

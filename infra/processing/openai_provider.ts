@@ -52,11 +52,9 @@ async function analyzeWithOpenAi(
     text: {
       format: {
         type: "json_schema",
-        json_schema: {
-          name: `report_${input.schemaVersion}`,
-          schema,
-          strict: true,
-        },
+        name: `report_${input.schemaVersion}`,
+        schema,
+        strict: true,
       },
     },
   } as const;
