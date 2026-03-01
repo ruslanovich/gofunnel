@@ -161,6 +161,11 @@ async function handleRequest(
     }
   }
 
+  if (method === "GET" && pathname === "/health") {
+    sendJson(res, 200, { status: "ok" });
+    return;
+  }
+
   if (method === "GET" && pathname === "/") {
     sendHtml(
       res,

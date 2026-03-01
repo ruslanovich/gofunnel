@@ -1,8 +1,10 @@
 name: Production YC Deploy
 
 on:
-  push:
+  workflow_run:
+    workflows: ["CI"]
     branches: [main]
+    types: [completed]
   workflow_dispatch:
 
 concurrency:
@@ -14,6 +16,7 @@ permissions:
 
 jobs:
   deploy:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     environment:
       name: production
@@ -102,6 +105,6 @@ jobs:
           sudo systemctl restart gofunnel-worker
 
           sleep 3
-          curl -sf --max-time 10 http://localhost:3000/ > /dev/null
+          curl -sf --max-time 10 http://localhost:3000/health > /dev/null
           echo "Health check passed"
           REMOTE_SCRIPT
