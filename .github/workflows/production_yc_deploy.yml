@@ -1,0 +1,107 @@
+name: Production YC Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: production-yc-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.PROD_SSH_PRIVATE_KEY }}
+
+      - name: Prepare deployment artifacts
+        shell: bash
+        env:
+          ENV_PROD_CONTENT: ${{ secrets.PROD_ENV_FILE }}
+          APP_DIR_SECRET: ${{ secrets.PROD_APP_DIR }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${ENV_PROD_CONTENT}" ]; then
+            echo "PROD_ENV_FILE secret is required" >&2
+            exit 1
+          fi
+
+          APP_DIR="${APP_DIR_SECRET:-/opt/gofunnel/production}"
+
+          printf '%s' "${ENV_PROD_CONTENT}" > /tmp/env.production
+          printf '%s' "${APP_DIR}" > /tmp/gofunnel_app_dir
+
+          tar \
+            --exclude='.git' \
+            --exclude='node_modules' \
+            --exclude='.env.local' \
+            --exclude='env.staging' \
+            --exclude='env.production' \
+            -czf /tmp/gofunnel-release.tgz .
+
+      - name: Upload artifacts to VM
+        shell: bash
+        env:
+          SSH_HOST: ${{ secrets.PROD_SSH_HOST }}
+          SSH_USER: ${{ secrets.PROD_SSH_USER }}
+          SSH_PORT: ${{ secrets.PROD_SSH_PORT }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${SSH_HOST}" ] || [ -z "${SSH_USER}" ]; then
+            echo "PROD_SSH_HOST and PROD_SSH_USER secrets are required" >&2
+            exit 1
+          fi
+
+          PORT="${SSH_PORT:-22}"
+          mkdir -p ~/.ssh
+          ssh-keyscan -p "${PORT}" "${SSH_HOST}" >> ~/.ssh/known_hosts
+
+          scp -P "${PORT}" /tmp/gofunnel-release.tgz "${SSH_USER}@${SSH_HOST}:/tmp/gofunnel-release.tgz"
+          scp -P "${PORT}" /tmp/env.production "${SSH_USER}@${SSH_HOST}:/tmp/env.production"
+          scp -P "${PORT}" /tmp/gofunnel_app_dir "${SSH_USER}@${SSH_HOST}:/tmp/gofunnel_app_dir"
+
+      - name: Deploy, migrate and restart services
+        shell: bash
+        env:
+          SSH_HOST: ${{ secrets.PROD_SSH_HOST }}
+          SSH_USER: ${{ secrets.PROD_SSH_USER }}
+          SSH_PORT: ${{ secrets.PROD_SSH_PORT }}
+        run: |
+          set -euo pipefail
+
+          PORT="${SSH_PORT:-22}"
+
+          ssh -p "${PORT}" "${SSH_USER}@${SSH_HOST}" 'bash -se' <<'REMOTE_SCRIPT'
+          set -euo pipefail
+
+          APP_DIR="$(cat /tmp/gofunnel_app_dir)"
+
+          mkdir -p "${APP_DIR}"
+          tar -xzf /tmp/gofunnel-release.tgz -C "${APP_DIR}"
+          install -m 600 /tmp/env.production "${APP_DIR}/env.production"
+
+          cd "${APP_DIR}"
+          npm ci
+          DOTENV_CONFIG_PATH=env.production npm run db:migrate
+
+          sudo systemctl restart gofunnel-http
+          sudo systemctl restart gofunnel-worker
+
+          sleep 3
+          curl -sf --max-time 10 http://localhost:3000/ > /dev/null
+          echo "Health check passed"
+          REMOTE_SCRIPT
