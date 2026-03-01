@@ -40,9 +40,47 @@ test("v2 prompt contract schema loads and validates payload shape", () => {
   }
 });
 
+test("v2 schema defines missing_questions items without allOf", () => {
+  const schema = readSchemaJson("v2");
+  const defs = asObjectRecord(schema.$defs, "$.$defs");
+  const itemsAndMissingQuestions = asObjectRecord(
+    defs.ItemsAndMissingQuestions,
+    "$.$defs.ItemsAndMissingQuestions",
+  );
+  const properties = asObjectRecord(
+    itemsAndMissingQuestions.properties,
+    "$.$defs.ItemsAndMissingQuestions.properties",
+  );
+  const missingQuestions = asObjectRecord(
+    properties.missing_questions,
+    "$.$defs.ItemsAndMissingQuestions.properties.missing_questions",
+  );
+  const items = asObjectRecord(
+    missingQuestions.items,
+    "$.$defs.ItemsAndMissingQuestions.properties.missing_questions.items",
+  );
+
+  assert.equal(items.allOf, undefined);
+  assert.equal(items.$ref, "#/$defs/MissingQuestionField");
+});
+
 function readFixtureJson(filename: string): unknown {
   const dir = path.dirname(fileURLToPath(import.meta.url));
   const fixturePath = path.join(dir, "fixtures", "report", filename);
   const raw = readFileSync(fixturePath, "utf8");
   return JSON.parse(raw) as unknown;
+}
+
+function readSchemaJson(version: string): Record<string, unknown> {
+  const dir = path.dirname(fileURLToPath(import.meta.url));
+  const schemaPath = path.join(dir, "..", "..", "schemas", "report", `${version}.json`);
+  const raw = readFileSync(schemaPath, "utf8");
+  return JSON.parse(raw) as Record<string, unknown>;
+}
+
+function asObjectRecord(value: unknown, location: string): Record<string, unknown> {
+  assert.equal(typeof value, "object", `Expected object at ${location}`);
+  assert.notEqual(value, null, `Expected non-null object at ${location}`);
+  assert.equal(Array.isArray(value), false, `Expected plain object at ${location}`);
+  return value as Record<string, unknown>;
 }

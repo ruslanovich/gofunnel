@@ -1648,6 +1648,7 @@ function renderAppDashboardPage(session: AuthenticatedSession): string {
       (() => {
         const LIST_FIRST_PAGE_URL = "/api/files?limit=20";
         const POLL_INTERVAL_MS = 7000;
+        const OVERLAY_POLL_INTERVAL_MS = 5000;
         const statusNode = document.getElementById("app-files-status");
         const uploadForm = document.getElementById("app-upload-form");
         const uploadInput = document.getElementById("app-upload-input");
@@ -1680,6 +1681,9 @@ function renderAppDashboardPage(session: AuthenticatedSession): string {
         let isUploading = false;
         let isLoadingFirstPage = false;
         let isLoadingMore = false;
+        let overlayPollTimer = null;
+        let overlayRequestToken = 0;
+        let overlayActiveFileId = null;
 
         function setStatus(message) {
           statusNode.textContent = message;
@@ -1737,7 +1741,29 @@ function renderAppDashboardPage(session: AuthenticatedSession): string {
           overlay.hidden = false;
         }
 
+        function stopOverlayPolling() {
+          if (overlayPollTimer === null) {
+            return;
+          }
+          window.clearTimeout(overlayPollTimer);
+          overlayPollTimer = null;
+        }
+
+        function scheduleOverlayPolling(fileId) {
+          stopOverlayPolling();
+          overlayPollTimer = window.setTimeout(() => {
+            overlayPollTimer = null;
+            if (overlay.hidden || overlayActiveFileId !== fileId) {
+              return;
+            }
+            void openFileDetails(fileId, { isPolling: true });
+          }, OVERLAY_POLL_INTERVAL_MS);
+        }
+
         function closeOverlay() {
+          stopOverlayPolling();
+          overlayRequestToken += 1;
+          overlayActiveFileId = null;
           overlay.hidden = true;
           overlayStatus.textContent = "";
           overlayContent.textContent = "";
@@ -1778,6 +1804,31 @@ function renderAppDashboardPage(session: AuthenticatedSession): string {
           return details.length > 0 ? details.join("\\n") : "No additional error details.";
         }
 
+        function formatProcessingDetails(payload) {
+          const details = [];
+          const attempts = payload && typeof payload.attempts === "number"
+            ? payload.attempts
+            : payload && typeof payload.processing_attempts === "number"
+              ? payload.processing_attempts
+              : null;
+          const maxAttempts = payload && typeof payload.max_attempts === "number" ? payload.max_attempts : null;
+          if (attempts !== null) {
+            details.push(
+              "attempt: " + String(attempts) + (maxAttempts !== null ? "/" + String(maxAttempts) : ""),
+            );
+          }
+          if (payload && typeof payload.next_run_at === "string" && payload.next_run_at.trim() !== "") {
+            details.push("next_run_at: " + payload.next_run_at);
+          }
+          if (payload && typeof payload.last_error_code === "string" && payload.last_error_code.trim() !== "") {
+            details.push("last_error_code: " + payload.last_error_code);
+          }
+          if (payload && typeof payload.last_error_message === "string" && payload.last_error_message.trim() !== "") {
+            details.push("last_error_message: " + payload.last_error_message);
+          }
+          return details.join("\\n");
+        }
+
         async function fetchListPage(cursor) {
           const url = cursor
             ? LIST_FIRST_PAGE_URL + "&cursor=" + encodeURIComponent(cursor)
@@ -1801,16 +1852,27 @@ function renderAppDashboardPage(session: AuthenticatedSession): string {
           return { items, nextCursor: decodedNextCursor };
         }
 
-        async function openFileDetails(fileId) {
-          openOverlay();
-          overlayStatus.textContent = "Loading metadata...";
-          overlayContent.textContent = "";
+        async function openFileDetails(fileId, options) {
+          const isPolling = Boolean(options && options.isPolling);
+          if (!isPolling) {
+            overlayActiveFileId = fileId;
+            openOverlay();
+            overlayStatus.textContent = "Loading metadata...";
+            overlayContent.textContent = "";
+          }
+
+          stopOverlayPolling();
+          const requestToken = ++overlayRequestToken;
           try {
             const response = await fetch("/api/files/" + encodeURIComponent(fileId), {
               headers: {
                 Accept: "application/json",
               },
             });
+
+            if (overlayRequestToken !== requestToken || overlayActiveFileId !== fileId) {
+              return;
+            }
 
             if (response.status === 404) {
               overlayStatus.textContent = "File not found.";
@@ -1826,13 +1888,17 @@ function renderAppDashboardPage(session: AuthenticatedSession): string {
 
             if (status === "failed") {
               overlayStatus.textContent = "Processing failed.";
-              overlayContent.textContent = formatErrorDetails(payload);
+              const combined = [formatErrorDetails(payload), formatProcessingDetails(payload)]
+                .filter((part) => part && part.trim() !== "")
+                .join("\\n");
+              overlayContent.textContent = combined || "No additional error details.";
               return;
             }
 
             if (status !== "succeeded") {
               overlayStatus.textContent = "Report is still processing";
-              overlayContent.textContent = "";
+              overlayContent.textContent = formatProcessingDetails(payload);
+              scheduleOverlayPolling(fileId);
               return;
             }
 
@@ -1857,7 +1923,8 @@ function renderAppDashboardPage(session: AuthenticatedSession): string {
                   reportPayload && typeof reportPayload.error === "string" ? reportPayload.error : "";
                 if (reportError === "report_not_ready") {
                   overlayStatus.textContent = "Report is still processing";
-                  overlayContent.textContent = "";
+                  overlayContent.textContent = formatProcessingDetails(payload);
+                  scheduleOverlayPolling(fileId);
                   return;
                 }
               }
@@ -1882,8 +1949,13 @@ function renderAppDashboardPage(session: AuthenticatedSession): string {
               overlayContent.textContent = "";
             }
           } catch {
+            if (overlayRequestToken !== requestToken || overlayActiveFileId !== fileId) {
+              return;
+            }
             overlayStatus.textContent = "Unable to load file metadata.";
-            overlayContent.textContent = "";
+            if (!overlay.hidden) {
+              scheduleOverlayPolling(fileId);
+            }
           }
         }
 
@@ -2167,6 +2239,12 @@ function serializeFileDetailsItem(item: FileDetailsItem): {
   status: string;
   created_at: string;
   updated_at: string;
+  processing_attempts: number;
+  attempts: number | null;
+  max_attempts: number | null;
+  next_run_at: string | null;
+  last_error_code: string | null;
+  last_error_message: string | null;
   error_code: string | null;
   error_message: string | null;
 } {
@@ -2179,6 +2257,12 @@ function serializeFileDetailsItem(item: FileDetailsItem): {
     status: item.status,
     created_at: item.createdAt.toISOString(),
     updated_at: item.updatedAt.toISOString(),
+    processing_attempts: item.processingAttempts,
+    attempts: item.attempts,
+    max_attempts: item.maxAttempts,
+    next_run_at: item.nextRunAt ? item.nextRunAt.toISOString() : null,
+    last_error_code: item.lastErrorCode,
+    last_error_message: sanitizeFileErrorMessageForResponse(item.lastErrorMessage),
     error_code: isFailed ? item.errorCode : null,
     error_message: isFailed ? sanitizeFileErrorMessageForResponse(item.errorMessage) : null,
   };

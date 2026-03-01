@@ -593,6 +593,12 @@ class InMemoryFileRepository implements FileMetadataRepository {
       createdAt: Date;
       updatedAt: Date;
       storageKeyReport: string | null;
+      processingAttempts: number;
+      jobAttempts: number | null;
+      jobMaxAttempts: number | null;
+      jobNextRunAt: Date | null;
+      jobLastErrorCode: string | null;
+      jobLastErrorMessage: string | null;
     }
   > = [];
   failCreateProcessingOnce: Error | null = null;
@@ -612,6 +618,12 @@ class InMemoryFileRepository implements FileMetadataRepository {
       errorCode: null,
       errorMessage: null,
       storageKeyReport: null,
+      processingAttempts: 0,
+      jobAttempts: null,
+      jobMaxAttempts: null,
+      jobNextRunAt: null,
+      jobLastErrorCode: null,
+      jobLastErrorMessage: null,
       createdAt: new Date(),
       updatedAt: new Date(),
     });
@@ -715,6 +727,12 @@ class InMemoryFileRepository implements FileMetadataRepository {
     status: "queued" | "processing" | "uploaded" | "succeeded" | "failed";
     createdAt: Date;
     updatedAt: Date;
+    processingAttempts: number;
+    attempts: number | null;
+    maxAttempts: number | null;
+    nextRunAt: Date | null;
+    lastErrorCode: string | null;
+    lastErrorMessage: string | null;
     errorCode: string | null;
     errorMessage: string | null;
   } | null> {
@@ -731,6 +749,12 @@ class InMemoryFileRepository implements FileMetadataRepository {
       status: row.status,
       createdAt: new Date(row.createdAt),
       updatedAt: new Date(row.updatedAt),
+      processingAttempts: row.processingAttempts,
+      attempts: row.jobAttempts,
+      maxAttempts: row.jobMaxAttempts,
+      nextRunAt: row.jobNextRunAt ? new Date(row.jobNextRunAt) : null,
+      lastErrorCode: row.jobLastErrorCode,
+      lastErrorMessage: row.jobLastErrorMessage,
       errorCode: row.errorCode,
       errorMessage: row.errorMessage,
     };
@@ -1089,6 +1113,12 @@ function seedUploadedFileRow(
     updatedAt?: Date;
     status?: "uploaded" | "queued" | "processing" | "succeeded" | "failed";
     storageKeyReport?: string | null;
+    processingAttempts?: number;
+    attempts?: number | null;
+    maxAttempts?: number | null;
+    nextRunAt?: Date | null;
+    lastErrorCode?: string | null;
+    lastErrorMessage?: string | null;
     errorCode?: string | null;
     errorMessage?: string | null;
   },
@@ -1106,6 +1136,12 @@ function seedUploadedFileRow(
     sizeBytes: input.sizeBytes,
     status,
     storageKeyReport: input.storageKeyReport ?? null,
+    processingAttempts: input.processingAttempts ?? 0,
+    jobAttempts: input.attempts ?? null,
+    jobMaxAttempts: input.maxAttempts ?? null,
+    jobNextRunAt: input.nextRunAt ? new Date(input.nextRunAt) : null,
+    jobLastErrorCode: input.lastErrorCode ?? null,
+    jobLastErrorMessage: input.lastErrorMessage ?? null,
     errorCode: input.errorCode ?? null,
     errorMessage: input.errorMessage ?? null,
     createdAt,
@@ -1225,6 +1261,7 @@ function createAppDashboardScriptHarness(input: {
   fetchCalls: string[];
   remainingFetchExpectations: () => number;
   clickFirstRow: () => void;
+  runTimeouts: (count?: number) => void;
   flush: () => Promise<void>;
 } {
   const script = extractInlineScript(input.html);
@@ -1285,10 +1322,20 @@ function createAppDashboardScriptHarness(input: {
   };
 
   const setIntervalCalls: Array<() => void> = [];
+  let nextTimeoutId = 0;
+  const timeoutCallbacks = new Map<number, () => void>();
   const windowObject = {
     setInterval(callback: () => void): number {
       setIntervalCalls.push(callback);
       return setIntervalCalls.length;
+    },
+    setTimeout(callback: () => void): number {
+      nextTimeoutId += 1;
+      timeoutCallbacks.set(nextTimeoutId, callback);
+      return nextTimeoutId;
+    },
+    clearTimeout(timeoutId: number): void {
+      timeoutCallbacks.delete(timeoutId);
     },
   };
 
@@ -1316,6 +1363,17 @@ function createAppDashboardScriptHarness(input: {
       const firstRow = filesBody.children[0];
       assert.ok(firstRow, "expected at least one file row rendered");
       firstRow.trigger("click");
+    },
+    runTimeouts: (count = 1) => {
+      for (let index = 0; index < count; index += 1) {
+        const firstEntry = timeoutCallbacks.entries().next();
+        if (firstEntry.done) {
+          return;
+        }
+        const [timeoutId, callback] = firstEntry.value;
+        timeoutCallbacks.delete(timeoutId);
+        callback();
+      }
     },
     flush: async () => {
       for (let attempt = 0; attempt < 8; attempt += 1) {
@@ -1616,6 +1674,94 @@ test("app overlay shows not ready message when report endpoint returns 409", asy
   assert.equal(dashboard.overlay.hidden, false);
   assert.equal(dashboard.overlayStatus.textContent, "Report is still processing");
   assert.equal(dashboard.overlayContent.textContent, "");
+  assert.equal(dashboard.remainingFetchExpectations(), 0);
+});
+
+test("app overlay polls metadata and shows processing diagnostics until terminal state", async () => {
+  const harness = createHarness();
+  const { cookie } = seedAuthenticatedSession(harness, {
+    email: "member@example.com",
+  });
+  const { baseUrl } = await harness.start();
+
+  const appResponse = await fetch(`${baseUrl}/app`, {
+    headers: {
+      Cookie: cookie,
+    },
+  });
+  assert.equal(appResponse.status, 200);
+
+  const dashboard = createAppDashboardScriptHarness({
+    html: await appResponse.text(),
+    fetchExpectations: [
+      {
+        url: "/api/files?limit=20",
+        status: 200,
+        body: {
+          items: [
+            {
+              id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+              original_filename: "processing.txt",
+              created_at: "2026-02-27T14:00:00.000Z",
+              status: "processing",
+              size_bytes: 123,
+            },
+          ],
+          next_cursor: null,
+        },
+      },
+      {
+        url: "/api/files/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+        status: 200,
+        body: {
+          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+          status: "processing",
+          processing_attempts: 2,
+          attempts: 2,
+          max_attempts: 4,
+          next_run_at: "2026-02-27T14:02:00.000Z",
+          last_error_code: "llm_timeout",
+          last_error_message: "timeout",
+          error_code: null,
+          error_message: null,
+        },
+      },
+      {
+        url: "/api/files/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+        status: 200,
+        body: {
+          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+          status: "failed",
+          processing_attempts: 4,
+          attempts: 4,
+          max_attempts: 4,
+          next_run_at: null,
+          last_error_code: "llm_timeout",
+          last_error_message: "timeout",
+          error_code: "llm_timeout",
+          error_message: "timed out after 180000ms",
+        },
+      },
+    ],
+  });
+
+  await dashboard.flush();
+  dashboard.clickFirstRow();
+  await dashboard.flush();
+
+  assert.equal(dashboard.overlay.hidden, false);
+  assert.equal(dashboard.overlayStatus.textContent, "Report is still processing");
+  assert.match(dashboard.overlayContent.textContent, /attempt:\s*2\/4/);
+  assert.match(dashboard.overlayContent.textContent, /last_error_code:\s*llm_timeout/);
+  assert.match(dashboard.overlayContent.textContent, /next_run_at:/);
+
+  dashboard.runTimeouts();
+  await dashboard.flush();
+
+  assert.equal(dashboard.overlayStatus.textContent, "Processing failed.");
+  assert.match(dashboard.overlayContent.textContent, /code:\s*llm_timeout/);
+  assert.match(dashboard.overlayContent.textContent, /message:\s*timed out after 180000ms/);
+  assert.match(dashboard.overlayContent.textContent, /attempt:\s*4\/4/);
   assert.equal(dashboard.remainingFetchExpectations(), 0);
 });
 
@@ -3157,8 +3303,68 @@ test("files details returns owner metadata with expected fields", async () => {
     status: "failed",
     created_at: createdAt.toISOString(),
     updated_at: updatedAt.toISOString(),
+    processing_attempts: 0,
+    attempts: null,
+    max_attempts: null,
+    next_run_at: null,
+    last_error_code: null,
+    last_error_message: null,
     error_code: "transcription_failed",
     error_message: "vendor error detail with extra spaces",
+  });
+});
+
+test("files details includes processing metadata for queued/processing states", async () => {
+  const harness = createHarness();
+  const { user: owner, cookie } = seedAuthenticatedSession(harness, {
+    id: "11111111-1111-4111-8111-111111111111",
+    email: "owner@example.com",
+  });
+  const createdAt = new Date("2026-02-27T12:00:00.000Z");
+  const updatedAt = new Date("2026-02-27T12:10:00.000Z");
+  const nextRunAt = new Date("2026-02-27T12:12:00.000Z");
+  seedUploadedFileRow(harness, {
+    id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+    userId: owner.id,
+    originalFilename: "processing.vtt",
+    extension: "vtt",
+    sizeBytes: 456,
+    status: "queued",
+    processingAttempts: 2,
+    attempts: 2,
+    maxAttempts: 4,
+    nextRunAt,
+    lastErrorCode: "llm_timeout",
+    lastErrorMessage: "  timed out   while   waiting ",
+    createdAt,
+    updatedAt,
+  });
+  const { baseUrl } = await harness.start();
+
+  const response = await fetch(`${baseUrl}/api/files/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1`, {
+    headers: {
+      Cookie: cookie,
+    },
+  });
+
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as Record<string, unknown>;
+  assert.deepEqual(payload, {
+    id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+    original_filename: "processing.vtt",
+    extension: "vtt",
+    size_bytes: 456,
+    status: "queued",
+    created_at: createdAt.toISOString(),
+    updated_at: updatedAt.toISOString(),
+    processing_attempts: 2,
+    attempts: 2,
+    max_attempts: 4,
+    next_run_at: nextRunAt.toISOString(),
+    last_error_code: "llm_timeout",
+    last_error_message: "timed out while waiting",
+    error_code: null,
+    error_message: null,
   });
 });
 

@@ -7,10 +7,18 @@
     "db:migrate": "tsx interfaces/cli/db_migrate.ts up",
     "db:rollback": "tsx interfaces/cli/db_migrate.ts down",
     "db:migrate:status": "tsx interfaces/cli/db_migrate.ts status",
+    "db:migrate:local": "DOTENV_CONFIG_PATH=.env.local tsx interfaces/cli/db_migrate.ts up",
+    "db:migrate:status:local": "DOTENV_CONFIG_PATH=.env.local tsx interfaces/cli/db_migrate.ts status",
+    "db:migrate:staging": "DOTENV_CONFIG_PATH=env.staging tsx interfaces/cli/db_migrate.ts up",
+    "db:migrate:status:staging": "DOTENV_CONFIG_PATH=env.staging tsx interfaces/cli/db_migrate.ts status",
     "db:verify:processing": "tsx interfaces/cli/db_verify_processing.ts",
     "bootstrap:admin": "tsx interfaces/cli/bootstrap_admin.ts",
     "http:start": "tsx interfaces/http/server_main.ts",
+    "http:start:local": "DOTENV_CONFIG_PATH=.env.local tsx interfaces/http/server_main.ts",
+    "http:start:staging": "DOTENV_CONFIG_PATH=env.staging tsx interfaces/http/server_main.ts",
     "worker:start": "tsx interfaces/cli/worker_start.ts",
+    "worker:start:local": "DOTENV_CONFIG_PATH=.env.local tsx interfaces/cli/worker_start.ts",
+    "worker:start:staging": "DOTENV_CONFIG_PATH=env.staging tsx interfaces/cli/worker_start.ts",
     "test": "./scripts/test.sh",
     "typecheck": "tsc --noEmit"
   },
@@ -28,5 +36,8 @@
     "@types/pg": "^8.15.6",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=24 <25"
   }
 }

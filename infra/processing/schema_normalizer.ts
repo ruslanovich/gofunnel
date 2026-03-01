@@ -65,7 +65,20 @@ function normalizeSchemaArrayKeyword(
   if (!Array.isArray(value)) {
     return;
   }
-  target[key] = value.map((item) => normalizeSchemaNode(item));
+  if (key === "allOf") {
+    // OpenAI Structured Outputs strict subset does not accept allOf.
+    return;
+  }
+  const normalizedItems = value
+    .map((item) => normalizeSchemaNode(item))
+    .filter((item) => !isStrictIncompatibleRequiredOnlyFragment(item));
+
+  if (normalizedItems.length === 0) {
+    delete target[key];
+    return;
+  }
+
+  target[key] = normalizedItems;
 }
 
 function normalizeSchemaMapKeyword(
@@ -89,3 +102,36 @@ function normalizeSchemaMapKeyword(
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+
+function isStrictIncompatibleRequiredOnlyFragment(node: unknown): boolean {
+  if (!isRecord(node)) {
+    return false;
+  }
+
+  if (!Array.isArray(node.required) || node.required.length === 0) {
+    return false;
+  }
+
+  for (const key of Object.keys(node)) {
+    if (key === "required") {
+      continue;
+    }
+    if (ANNOTATION_KEYWORDS.has(key)) {
+      continue;
+    }
+    return false;
+  }
+
+  return true;
+}
+
+const ANNOTATION_KEYWORDS = new Set([
+  "title",
+  "description",
+  "examples",
+  "default",
+  "$comment",
+  "deprecated",
+  "readOnly",
+  "writeOnly",
+]);

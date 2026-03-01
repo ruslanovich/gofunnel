@@ -1,0 +1,4 @@
+
+> gofunnel@0.1.0 worker:start
+> tsx interfaces/cli/worker_start.ts
+

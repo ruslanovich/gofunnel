@@ -22,7 +22,15 @@
 - `docs/03_execution_plans/2026-02-27_epic-2-upload-files.md`
 - `docs/03_execution_plans/2026-02-27_epic-3-processing-reports.md`
 - `docs/03_execution_plans/2026-02-27_pr-3-1-llm-adapter-ajv-validation.md`
+- `docs/03_execution_plans/2026-02-27_pr-3-1e-structured-outputs-anyof-strict-fix.md`
+- `docs/03_execution_plans/2026-02-27_pr-3-1f-structured-outputs-allof-removal.md`
+- `docs/03_execution_plans/2026-02-27_pr-3-1g-openai-network-error-diagnostics.md`
+- `docs/03_execution_plans/2026-02-27_pr-3-1h-openai-sdk-retries-attempt-logging.md`
 - `docs/03_execution_plans/2026-02-27_pr-3-2-worker-pipeline-s3-llm-validate-s3-db.md`
 - `docs/03_execution_plans/2026-02-27_pr-3-3-get-report-endpoint.md`
 - `docs/03_execution_plans/2026-02-27_pr-4-1-app-ui-upload-list-overlay-polling.md`
+- `docs/03_execution_plans/2026-02-27_pr-4-1b-overlay-polling-processing-metadata.md`
 - `docs/03_execution_plans/2026-02-27_pr-dx-ci-node-deps-install.md`
+- `docs/03_execution_plans/2026-02-27_pr-dx-node-lts-runtime-pin.md`
+- `docs/03_execution_plans/2026-02-27_pr-3-1i-llm-transport-root-cause-diagnostics.md`
+- `docs/03_execution_plans/2026-02-27_pr-dx-staging-env-vps-actions.md`

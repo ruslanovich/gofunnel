@@ -17,6 +17,7 @@
 - MCP reference: `docs/06_reference/mcp.md`
 - Yandex Object Storage runbook: `docs/04_runbooks/yandex_object_storage.md`
 - Admin bootstrap + migrations runbook: `docs/04_runbooks/admin_bootstrap.md`
+- Staging VPS deploy/smoke runbook: `docs/04_runbooks/staging_vps_github_actions.md`
 - ADR template: `docs/05_decisions/ADR_TEMPLATE.md`
 - Execution plan template: `docs/03_execution_plans/PLAN_TEMPLATE.md`
 
@@ -37,9 +38,17 @@
 - Epic 3 PR-3.1b execution plan (OpenAI provider default): `docs/03_execution_plans/2026-02-27_pr-3-1b-openai-provider-gpt5mini.md`
 - Epic 3 PR-3.1c execution plan (Structured Outputs schema normalizer): `docs/03_execution_plans/2026-02-27_pr-3-1c-structured-outputs-schema-normalizer.md`
 - Epic 3 PR-3.1d execution plan (use prompt.txt instruction + schema): `docs/03_execution_plans/2026-02-27_pr-3-1d-use-prompt-txt-contract.md`
+- Epic 3 PR-3.1e execution plan (Structured Outputs anyOf strict fix): `docs/03_execution_plans/2026-02-27_pr-3-1e-structured-outputs-anyof-strict-fix.md`
+- Epic 3 PR-3.1f execution plan (Structured Outputs allOf removal): `docs/03_execution_plans/2026-02-27_pr-3-1f-structured-outputs-allof-removal.md`
+- Epic 3 PR-3.1g execution plan (OpenAI network error diagnostics): `docs/03_execution_plans/2026-02-27_pr-3-1g-openai-network-error-diagnostics.md`
+- Epic 3 PR-3.1h execution plan (OpenAI SDK retries + attempt logging): `docs/03_execution_plans/2026-02-27_pr-3-1h-openai-sdk-retries-attempt-logging.md`
 - Epic 3 PR-3.2 execution plan: `docs/03_execution_plans/2026-02-27_pr-3-2-worker-pipeline-s3-llm-validate-s3-db.md`
 - Epic 3 PR-3.3 execution plan: `docs/03_execution_plans/2026-02-27_pr-3-3-get-report-endpoint.md`
 - DX CI node dependency install plan: `docs/03_execution_plans/2026-02-27_pr-dx-ci-node-deps-install.md`
+- DX Node LTS runtime pin plan: `docs/03_execution_plans/2026-02-27_pr-dx-node-lts-runtime-pin.md`
+- DX staging env + VPS actions plan: `docs/03_execution_plans/2026-02-27_pr-dx-staging-env-vps-actions.md`
+- Epic 3 PR-3.1i execution plan (LLM transport root-cause diagnostics): `docs/03_execution_plans/2026-02-27_pr-3-1i-llm-transport-root-cause-diagnostics.md`
+- Epic 4 PR-4.1b execution plan (overlay polling + processing metadata): `docs/03_execution_plans/2026-02-27_pr-4-1b-overlay-polling-processing-metadata.md`
 - ADR-0005 S3 client + Yandex config: `docs/05_decisions/2026-02-27_adr-0005_s3-client-yandex-object-storage-config.md`
 - ADR-0006 Upload transport strategy: `docs/05_decisions/2026-02-27_adr-0006_upload-transport-strategy.md`
 - ADR-0007 Files pagination strategy: `docs/05_decisions/2026-02-27_adr-0007_files-list-pagination-strategy.md`

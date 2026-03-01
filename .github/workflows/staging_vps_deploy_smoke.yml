@@ -1,0 +1,143 @@
+name: Staging VPS Deploy and Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to deploy
+        required: true
+        default: main
+        type: string
+      run_smoke:
+        description: Run smoke command on VPS after deploy
+        required: true
+        default: true
+        type: boolean
+      restart_command:
+        description: Optional restart command override
+        required: false
+        type: string
+      smoke_command:
+        description: Optional smoke command override
+        required: false
+        type: string
+
+concurrency:
+  group: staging-vps-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Start SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.STAGING_SSH_PRIVATE_KEY }}
+
+      - name: Prepare deployment artifacts
+        shell: bash
+        env:
+          ENV_STAGING_CONTENT: ${{ secrets.STAGING_ENV_FILE }}
+          INPUT_RESTART_COMMAND: ${{ inputs.restart_command }}
+          INPUT_SMOKE_COMMAND: ${{ inputs.smoke_command }}
+          SECRET_RESTART_COMMAND: ${{ secrets.STAGING_RESTART_COMMAND }}
+          SECRET_SMOKE_COMMAND: ${{ secrets.STAGING_SMOKE_COMMAND }}
+          APP_DIR_SECRET: ${{ secrets.STAGING_APP_DIR }}
+          RUN_SMOKE_INPUT: ${{ inputs.run_smoke }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${ENV_STAGING_CONTENT}" ]; then
+            echo "STAGING_ENV_FILE secret is required" >&2
+            exit 1
+          fi
+
+          APP_DIR="${APP_DIR_SECRET:-/opt/gofunnel/staging}"
+          RESTART_COMMAND="${INPUT_RESTART_COMMAND:-${SECRET_RESTART_COMMAND:-}}"
+          SMOKE_COMMAND="${INPUT_SMOKE_COMMAND:-${SECRET_SMOKE_COMMAND:-}}"
+          RUN_SMOKE="${RUN_SMOKE_INPUT}"
+
+          printf '%s' "${ENV_STAGING_CONTENT}" > /tmp/env.staging
+          printf '%s' "${APP_DIR}" > /tmp/gofunnel_app_dir
+          printf '%s' "${RESTART_COMMAND}" | base64 > /tmp/gofunnel_restart_command.b64
+          printf '%s' "${SMOKE_COMMAND}" | base64 > /tmp/gofunnel_smoke_command.b64
+          printf '%s' "${RUN_SMOKE}" > /tmp/gofunnel_run_smoke
+
+          tar \
+            --exclude='.git' \
+            --exclude='node_modules' \
+            --exclude='.env.local' \
+            --exclude='env.staging' \
+            -czf /tmp/gofunnel-release.tgz .
+
+      - name: Upload artifacts to VPS
+        shell: bash
+        env:
+          SSH_HOST: ${{ secrets.STAGING_SSH_HOST }}
+          SSH_USER: ${{ secrets.STAGING_SSH_USER }}
+          SSH_PORT: ${{ secrets.STAGING_SSH_PORT }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${SSH_HOST}" ] || [ -z "${SSH_USER}" ]; then
+            echo "STAGING_SSH_HOST and STAGING_SSH_USER secrets are required" >&2
+            exit 1
+          fi
+
+          PORT="${SSH_PORT:-22}"
+          mkdir -p ~/.ssh
+          ssh-keyscan -p "${PORT}" "${SSH_HOST}" >> ~/.ssh/known_hosts
+
+          scp -P "${PORT}" /tmp/gofunnel-release.tgz "${SSH_USER}@${SSH_HOST}:/tmp/gofunnel-release.tgz"
+          scp -P "${PORT}" /tmp/env.staging "${SSH_USER}@${SSH_HOST}:/tmp/env.staging"
+          scp -P "${PORT}" /tmp/gofunnel_app_dir "${SSH_USER}@${SSH_HOST}:/tmp/gofunnel_app_dir"
+          scp -P "${PORT}" /tmp/gofunnel_restart_command.b64 "${SSH_USER}@${SSH_HOST}:/tmp/gofunnel_restart_command.b64"
+          scp -P "${PORT}" /tmp/gofunnel_smoke_command.b64 "${SSH_USER}@${SSH_HOST}:/tmp/gofunnel_smoke_command.b64"
+          scp -P "${PORT}" /tmp/gofunnel_run_smoke "${SSH_USER}@${SSH_HOST}:/tmp/gofunnel_run_smoke"
+
+      - name: Deploy and run optional smoke on VPS
+        shell: bash
+        env:
+          SSH_HOST: ${{ secrets.STAGING_SSH_HOST }}
+          SSH_USER: ${{ secrets.STAGING_SSH_USER }}
+          SSH_PORT: ${{ secrets.STAGING_SSH_PORT }}
+        run: |
+          set -euo pipefail
+
+          PORT="${SSH_PORT:-22}"
+
+          ssh -p "${PORT}" "${SSH_USER}@${SSH_HOST}" 'bash -se' <<'REMOTE_SCRIPT'
+          set -euo pipefail
+
+          APP_DIR="$(cat /tmp/gofunnel_app_dir)"
+          RUN_SMOKE="$(cat /tmp/gofunnel_run_smoke)"
+          RESTART_COMMAND="$(base64 -d /tmp/gofunnel_restart_command.b64 || true)"
+          SMOKE_COMMAND="$(base64 -d /tmp/gofunnel_smoke_command.b64 || true)"
+
+          mkdir -p "${APP_DIR}"
+          tar -xzf /tmp/gofunnel-release.tgz -C "${APP_DIR}"
+          install -m 600 /tmp/env.staging "${APP_DIR}/env.staging"
+
+          cd "${APP_DIR}"
+          npm ci
+          DOTENV_CONFIG_PATH=env.staging npm run db:migrate
+
+          if [ -n "${RESTART_COMMAND}" ]; then
+            bash -lc "${RESTART_COMMAND}"
+          fi
+
+          if [ "${RUN_SMOKE}" = "true" ] && [ -n "${SMOKE_COMMAND}" ]; then
+            bash -lc "${SMOKE_COMMAND}"
+          fi
+          REMOTE_SCRIPT

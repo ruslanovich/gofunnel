@@ -150,22 +150,36 @@ export class PostgresFileRepository implements FileMetadataRepository {
       status: FileDetailsItem["status"];
       created_at: Date;
       updated_at: Date;
+      processing_attempts: number;
+      job_attempts: number | null;
+      max_attempts: number | null;
+      next_run_at: Date | null;
+      job_last_error_code: string | null;
+      job_last_error_message: string | null;
       error_code: string | null;
       error_message: string | null;
     }>(
       `
       SELECT
-        id,
-        original_filename,
-        extension,
-        size_bytes,
-        status,
-        created_at,
-        updated_at,
-        error_code,
-        error_message
+        files.id,
+        files.original_filename,
+        files.extension,
+        files.size_bytes,
+        files.status,
+        files.created_at,
+        files.updated_at,
+        files.processing_attempts,
+        jobs.attempts AS job_attempts,
+        jobs.max_attempts,
+        jobs.next_run_at,
+        jobs.last_error_code AS job_last_error_code,
+        jobs.last_error_message AS job_last_error_message,
+        files.error_code,
+        files.error_message
       FROM files
-      WHERE id = $1::uuid AND user_id = $2::uuid
+      LEFT JOIN processing_jobs jobs
+        ON jobs.file_id = files.id
+      WHERE files.id = $1::uuid AND files.user_id = $2::uuid
       LIMIT 1
       `,
       [input.id, input.userId],
@@ -276,6 +290,12 @@ function mapDetailsRow(row: {
   status: FileDetailsItem["status"];
   created_at: Date;
   updated_at: Date;
+  processing_attempts: number;
+  job_attempts: number | null;
+  max_attempts: number | null;
+  next_run_at: Date | null;
+  job_last_error_code: string | null;
+  job_last_error_message: string | null;
   error_code: string | null;
   error_message: string | null;
 }): FileDetailsItem {
@@ -287,6 +307,12 @@ function mapDetailsRow(row: {
     status: row.status,
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
+    processingAttempts: row.processing_attempts,
+    attempts: row.job_attempts,
+    maxAttempts: row.max_attempts,
+    nextRunAt: row.next_run_at ? new Date(row.next_run_at) : null,
+    lastErrorCode: row.job_last_error_code,
+    lastErrorMessage: row.job_last_error_message,
     errorCode: row.error_code,
     errorMessage: row.error_message,
   };

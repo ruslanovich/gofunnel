@@ -361,6 +361,18 @@
       }
     },
 
+    "MissingQuestionField": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "status", "confidence", "evidence"],
+      "properties": {
+        "value": { "type": "string" },
+        "status": { "type": "string", "enum": ["missing", "not_discussed"] },
+        "confidence": { "$ref": "#/$defs/Confidence" },
+        "evidence": { "$ref": "#/$defs/EvidenceArray" }
+      }
+    },
+
     "AtomicFieldStatusOnly": {
       "type": "object",
       "additionalProperties": false,
@@ -398,14 +410,7 @@
           "type": "array",
           "maxItems": 10,
           "items": {
-            "allOf": [
-              { "$ref": "#/$defs/AtomicField" },
-              {
-                "properties": {
-                  "status": { "enum": ["missing", "not_discussed"] }
-                }
-              }
-            ]
+            "$ref": "#/$defs/MissingQuestionField"
           }
         }
       }
@@ -424,5 +429,4 @@
     }
   }
 }
-
 

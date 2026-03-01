@@ -10,18 +10,23 @@ import { validateReportPayload } from "../../infra/processing/report_schema_vali
 import { createS3StorageService } from "../../infra/storage/s3_client.js";
 
 const DEFAULT_WORKER_LLM_TIMEOUT_MS = 60_000;
+const OPENAI_LOG_LEVELS = new Set(["debug", "info", "warn", "error", "off"]);
+type OpenAiLogLevel = "debug" | "info" | "warn" | "error" | "off";
 
 async function main(): Promise<void> {
   const concurrency = parsePositiveIntegerEnv("WORKER_CONCURRENCY", 2);
   const pollMs = parsePositiveIntegerEnv("WORKER_POLL_MS", 1_000);
   const llmTimeoutMs = parsePositiveIntegerEnv("WORKER_LLM_TIMEOUT_MS", DEFAULT_WORKER_LLM_TIMEOUT_MS);
+  const openAiLogLevel = parseOptionalOpenAiLogLevelEnv("WORKER_OPENAI_LOG_LEVEL");
   const workerId = process.env.WORKER_ID?.trim() || `${os.hostname()}:${process.pid}`;
 
   const pool = createPgPool("gofunnel-worker");
   const repository = new PostgresProcessingJobRepository(pool);
   const storage = createS3StorageService();
   const llmAdapter = createLlmAdapter({
-    providers: createWorkerLlmProviderRegistry(),
+    providers: createWorkerLlmProviderRegistry({
+      openAiLogLevel,
+    }),
   });
   const processor = createReportPipelineProcessor({
     fileRepository: repository,
@@ -29,18 +34,7 @@ async function main(): Promise<void> {
     llmAdapter,
     validateReportPayload,
     llmTimeoutMs,
-    logEvent: (event, fields) => {
-      console.error(
-        JSON.stringify(
-          {
-            event,
-            ...fields,
-          },
-          null,
-          2,
-        ),
-      );
-    },
+    logEvent: logJsonEvent,
   });
 
   const worker = new ProcessingWorker({
@@ -49,18 +43,7 @@ async function main(): Promise<void> {
     pollMs,
     repository,
     processor,
-    logEvent: (event, fields) => {
-      console.error(
-        JSON.stringify(
-          {
-            event,
-            ...fields,
-          },
-          null,
-          2,
-        ),
-      );
-    },
+    logEvent: logJsonEvent,
   });
 
   const shutdown = () => {
@@ -95,7 +78,20 @@ function parsePositiveIntegerEnv(name: string, defaultValue: number): number {
   return parsed;
 }
 
-function createWorkerLlmProviderRegistry(): Record<string, LlmProviderClient> {
+function parseOptionalOpenAiLogLevelEnv(name: string): OpenAiLogLevel | undefined {
+  const raw = process.env[name]?.trim().toLowerCase();
+  if (!raw) {
+    return undefined;
+  }
+  if (!OPENAI_LOG_LEVELS.has(raw)) {
+    throw new Error(`${name} must be one of: debug, info, warn, error, off`);
+  }
+  return raw as OpenAiLogLevel;
+}
+
+function createWorkerLlmProviderRegistry(input: {
+  openAiLogLevel?: OpenAiLogLevel;
+}): Record<string, LlmProviderClient> {
   const fakeProvider: LlmProviderClient = {
     analyze: async () => {
       throw new Error("Fake LLM provider is enabled. Use only for tests or explicit local diagnostics.");
@@ -108,9 +104,25 @@ function createWorkerLlmProviderRegistry(): Record<string, LlmProviderClient> {
   };
 
   return {
-    openai: createOpenAiProvider(),
+    openai: createOpenAiProvider({
+      logEvent: logJsonEvent,
+      logLevel: input.openAiLogLevel,
+    }),
     fake: fakeProvider,
   };
+}
+
+function logJsonEvent(event: string, fields: Record<string, unknown>): void {
+  console.error(
+    JSON.stringify(
+      {
+        event,
+        ...fields,
+      },
+      null,
+      2,
+    ),
+  );
 }
 
 main().catch((error) => {

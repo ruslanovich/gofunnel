@@ -53,6 +53,12 @@ export type FileDetailsItem = {
   status: FileStatus;
   createdAt: Date;
   updatedAt: Date;
+  processingAttempts: number;
+  attempts: number | null;
+  maxAttempts: number | null;
+  nextRunAt: Date | null;
+  lastErrorCode: string | null;
+  lastErrorMessage: string | null;
   errorCode: string | null;
   errorMessage: string | null;
 };

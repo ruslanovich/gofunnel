@@ -69,6 +69,21 @@ test("normalizer applies required-all-keys rule to prompt.txt schema (v2)", () =
   );
 });
 
+test("normalizer removes strict-incompatible required-only anyOf fragments", () => {
+  const normalized = normalizeForStructuredOutputsStrict(readReportSchema("v2"));
+  const root = asObjectRecord(normalized, "$root");
+  const defs = asObjectRecord(root.$defs, "$.$defs");
+  const evidence = asObjectRecord(defs.Evidence, "$.$defs.Evidence");
+
+  assert.equal(evidence.anyOf, undefined);
+});
+
+test("normalizer removes allOf from v2 schema for strict compatibility", () => {
+  const normalized = normalizeForStructuredOutputsStrict(readReportSchema("v2"));
+
+  assert.equal(hasSchemaKeyword(normalized, "allOf"), false);
+});
+
 function collectObjectSchemaNodes(
   schema: unknown,
 ): Array<{ path: string; node: { properties?: Record<string, unknown>; required?: unknown; additionalProperties?: unknown } }> {
@@ -163,6 +178,16 @@ function visitDictionaryOfSchemas(
   for (const [key, child] of Object.entries(value)) {
     visitSchema(child, `${pathValue}.${key}`, onNode);
   }
+}
+
+function hasSchemaKeyword(schema: unknown, keyword: "allOf"): boolean {
+  let found = false;
+  visitSchema(schema, "$", (node) => {
+    if (keyword in node) {
+      found = true;
+    }
+  });
+  return found;
 }
 
 function toStringArray(value: unknown): string[] {

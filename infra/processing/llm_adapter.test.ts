@@ -143,6 +143,33 @@ test("timeout hook marks errors as retriable timeout failures", async () => {
   );
 });
 
+test("outer timeout can be disabled via env", async () => {
+  const provider = createFakeProvider({
+    run: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return {
+        rawText: JSON.stringify({ ok: true }),
+      };
+    },
+  });
+
+  const adapter = createLlmAdapter({
+    env: {
+      ...BASE_ENV,
+      LLM_DISABLE_OUTER_TIMEOUT: "true",
+    },
+    providers: {
+      fake: provider,
+    },
+  });
+
+  const result = await adapter.analyzeTranscript({
+    transcriptText: "hello transcript",
+    timeoutMs: 10,
+  });
+  assert.deepEqual(result.parsedJson, { ok: true });
+});
+
 test("provider selection defaults to openai outside test env", async () => {
   const calls: ProviderAnalyzeInput[] = [];
   const adapter = createLlmAdapter({
@@ -219,17 +246,21 @@ test("production fails fast when API key is missing", () => {
 
 test("openai provider analyze uses structured output request and returns parsed JSON", async () => {
   const calls: unknown[] = [];
+  const createClientInputs: Array<Record<string, unknown>> = [];
   const provider = createOpenAiProvider({
-    createClient: () => ({
-      responses: {
-        create: async (request) => {
-          calls.push(request);
-          return {
-            output_text: "{\"overview\":\"ok\"}",
-          };
+    createClient: (input) => {
+      createClientInputs.push(input as Record<string, unknown>);
+      return {
+        responses: {
+          create: async (request) => {
+            calls.push(request);
+            return {
+              output_text: "{\"overview\":\"ok\"}",
+            };
+          },
         },
-      },
-    }),
+      };
+    },
   });
 
   const result = await provider.analyze({
@@ -243,6 +274,10 @@ test("openai provider analyze uses structured output request and returns parsed 
   });
 
   assert.equal(calls.length, 1);
+  assert.equal(createClientInputs.length, 1);
+  assert.equal(createClientInputs[0]?.maxRetries, 2);
+  assert.equal(typeof createClientInputs[0]?.onHttpAttempt, "function");
+  assert.equal(typeof createClientInputs[0]?.onHttpError, "function");
   const structuredRequest = calls[0] as {
     text?: {
       format?: {
@@ -309,6 +344,170 @@ test("openai provider classifies 429/5xx/timeout as retriable", () => {
     message: "invalid request",
   });
   assert.equal(badRequest?.retriable, false);
+});
+
+test("openai provider includes network diagnostic codes in error summary", () => {
+  const provider = createOpenAiProvider({
+    createClient: () => ({
+      responses: {
+        create: async () => ({
+          output_text: "{\"overview\":\"ok\"}",
+        }),
+      },
+    }),
+  });
+
+  const classified = provider.classifyError?.({
+    code: "ECONNRESET",
+    message: "Connection error.",
+    cause: {
+      code: "ECONNRESET",
+      syscall: "read",
+    },
+  });
+
+  assert.equal(classified?.errorCode, "llm_network_error");
+  assert.equal(classified?.retriable, true);
+  assert.match(classified?.errorSummary ?? "", /code=ECONNRESET/);
+  assert.match(classified?.errorSummary ?? "", /cause1_code=ECONNRESET/);
+});
+
+test("openai provider includes nested fetch cause diagnostics", () => {
+  const provider = createOpenAiProvider({
+    createClient: () => ({
+      responses: {
+        create: async () => ({
+          output_text: "{\"overview\":\"ok\"}",
+        }),
+      },
+    }),
+  });
+
+  const classified = provider.classifyError?.({
+    code: "ECONNRESET",
+    message: "Connection error.",
+    cause: {
+      message: "fetch failed",
+      cause: {
+        code: "ECONNRESET",
+        errno: -54,
+        syscall: "read",
+      },
+    },
+  });
+
+  assert.equal(classified?.errorCode, "llm_network_error");
+  assert.equal(classified?.retriable, true);
+  assert.match(classified?.errorSummary ?? "", /cause2_code=ECONNRESET/);
+  assert.match(classified?.errorSummary ?? "", /cause2_errno=-54/);
+  assert.match(classified?.errorSummary ?? "", /cause2_syscall=read/);
+});
+
+test("openai provider emits http attempt telemetry", async () => {
+  const events: Array<{ event: string; fields: Record<string, unknown> }> = [];
+  const provider = createOpenAiProvider({
+    logEvent: (event, fields) => {
+      events.push({
+        event,
+        fields,
+      });
+    },
+    createClient: (input) => ({
+      responses: {
+        create: async () => {
+          const telemetry = (input as Record<string, unknown>).onHttpAttempt;
+          if (typeof telemetry === "function") {
+            (telemetry as (details: { attempt: number; url: string; method: string }) => void)({
+              attempt: 1,
+              url: "https://api.openai.com/v1/responses",
+              method: "POST",
+            });
+            (telemetry as (details: { attempt: number; url: string; method: string }) => void)({
+              attempt: 2,
+              url: "https://api.openai.com/v1/responses",
+              method: "POST",
+            });
+          }
+          return {
+            output_text: "{\"overview\":\"ok\"}",
+          };
+        },
+      },
+    }),
+  });
+
+  await provider.analyze({
+    transcriptText: "hello transcript",
+    promptText: "return json only",
+    promptVersion: "v2",
+    schemaVersion: "v2",
+    model: "gpt-5-mini",
+    apiKey: "test-api-key",
+    timeoutMs: 2000,
+  });
+
+  const attempts = events
+    .filter((entry) => entry.event === "openai_http_attempt")
+    .map((entry) => entry.fields.attempt);
+  assert.deepEqual(attempts, [1, 2]);
+});
+
+test("openai provider emits fetch/undici error diagnostics", async () => {
+  const events: Array<{ event: string; fields: Record<string, unknown> }> = [];
+  const provider = createOpenAiProvider({
+    logEvent: (event, fields) => {
+      events.push({
+        event,
+        fields,
+      });
+    },
+    createClient: (input) => ({
+      responses: {
+        create: async () => {
+          const onHttpError = (input as Record<string, unknown>).onHttpError;
+          if (typeof onHttpError === "function") {
+            (onHttpError as (details: { attempt: number; error: unknown }) => void)({
+              attempt: 1,
+              error: {
+                name: "TypeError",
+                message: "fetch failed",
+                cause: {
+                  code: "UND_ERR_BODY_TIMEOUT",
+                  name: "BodyTimeoutError",
+                  message: "Body Timeout Error",
+                  cause: {
+                    code: "ECONNRESET",
+                    syscall: "read",
+                  },
+                },
+              },
+            });
+          }
+          return {
+            output_text: "{\"overview\":\"ok\"}",
+          };
+        },
+      },
+    }),
+  });
+
+  await provider.analyze({
+    transcriptText: "hello transcript",
+    promptText: "return json only",
+    promptVersion: "v2",
+    schemaVersion: "v2",
+    model: "gpt-5-mini",
+    apiKey: "test-api-key",
+    timeoutMs: 2000,
+  });
+
+  const diagnostic = events.find((entry) => entry.event === "openai_http_error");
+  assert.ok(diagnostic);
+  assert.equal(diagnostic?.fields.attempt, 1);
+  assert.equal(diagnostic?.fields.undici_code, "UND_ERR_BODY_TIMEOUT");
+  assert.equal(diagnostic?.fields.cause1_code, "UND_ERR_BODY_TIMEOUT");
+  assert.equal(diagnostic?.fields.cause2_code, "ECONNRESET");
+  assert.equal(diagnostic?.fields.cause2_syscall, "read");
 });
 
 function createFakeProvider(input: {

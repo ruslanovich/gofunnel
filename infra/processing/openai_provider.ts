@@ -21,17 +21,41 @@ type OpenAiClientLike = {
 type CreateOpenAiClientInput = {
   apiKey: string;
   timeoutMs: number;
+  maxRetries: number;
+  logLevel?: OpenAiLogLevel;
+  onHttpAttempt?: (input: {
+    attempt: number;
+    method: string;
+    url: string;
+  }) => void;
+  onHttpError?: (input: {
+    attempt: number;
+    method: string;
+    url: string;
+    error: unknown;
+  }) => void;
 };
+
+type OpenAiProviderLogEvent = (event: string, fields: Record<string, unknown>) => void;
+type OpenAiLogLevel = "debug" | "info" | "warn" | "error" | "off";
 
 const REPORT_SCHEMA_DIR = path.join(resolveRepositoryRootDir(), "schemas", "report");
 const schemaCache = new Map<string, Record<string, unknown>>();
+const DEFAULT_OPENAI_MAX_RETRIES = 2;
 
 export function createOpenAiProvider(options?: {
   createClient?: (input: CreateOpenAiClientInput) => OpenAiClientLike;
+  maxRetries?: number;
+  logLevel?: OpenAiLogLevel;
+  logEvent?: OpenAiProviderLogEvent;
 }): LlmProviderClient {
   const createClient = options?.createClient ?? createDefaultOpenAiClient;
+  const maxRetries = normalizeMaxRetries(options?.maxRetries);
+  const logLevel = options?.logLevel;
+  const logEvent = options?.logEvent ?? (() => undefined);
+
   return {
-    analyze: async (input) => analyzeWithOpenAi(createClient, input),
+    analyze: async (input) => analyzeWithOpenAi(createClient, input, { maxRetries, logLevel, logEvent }),
     classifyError: classifyOpenAiError,
   };
 }
@@ -39,10 +63,43 @@ export function createOpenAiProvider(options?: {
 async function analyzeWithOpenAi(
   createClient: (input: CreateOpenAiClientInput) => OpenAiClientLike,
   input: ProviderAnalyzeInput,
+  options: {
+    maxRetries: number;
+    logLevel?: OpenAiLogLevel;
+    logEvent: OpenAiProviderLogEvent;
+  },
 ): Promise<ProviderAnalyzeResult> {
+  let requestPhase = "structured_json_schema";
   const client = createClient({
     apiKey: input.apiKey,
     timeoutMs: input.timeoutMs,
+    maxRetries: options.maxRetries,
+    logLevel: options.logLevel,
+    onHttpAttempt: (details) => {
+      options.logEvent("openai_http_attempt", {
+        phase: requestPhase,
+        attempt: details.attempt,
+        method: details.method,
+        url: details.url,
+        maxRetries: options.maxRetries,
+        model: input.model,
+        promptVersion: input.promptVersion,
+        schemaVersion: input.schemaVersion,
+      });
+    },
+    onHttpError: (details) => {
+      options.logEvent("openai_http_error", {
+        phase: requestPhase,
+        attempt: details.attempt,
+        method: details.method,
+        url: details.url,
+        maxRetries: options.maxRetries,
+        model: input.model,
+        promptVersion: input.promptVersion,
+        schemaVersion: input.schemaVersion,
+        ...extractTransportErrorFields(details.error),
+      });
+    },
   });
 
   const schema = loadReportSchema(input.schemaVersion);
@@ -61,6 +118,7 @@ async function analyzeWithOpenAi(
   } as const;
 
   try {
+    requestPhase = "structured_json_schema";
     const response = await client.responses.create(structuredRequest);
     const rawText = extractOutputText(response);
     return {
@@ -73,6 +131,7 @@ async function analyzeWithOpenAi(
     }
   }
 
+  requestPhase = "fallback_json_object";
   const fallbackResponse = await client.responses.create({
     model: input.model,
     instructions: `${input.promptText}\n\nReturn exactly one JSON object and nothing else.`,
@@ -92,11 +151,149 @@ async function analyzeWithOpenAi(
 }
 
 function createDefaultOpenAiClient(input: CreateOpenAiClientInput): OpenAiClientLike {
-  return new OpenAI({
+  const clientOptions: ConstructorParameters<typeof OpenAI>[0] = {
     apiKey: input.apiKey,
     timeout: input.timeoutMs,
-    maxRetries: 0,
-  });
+    maxRetries: input.maxRetries,
+    logLevel: input.logLevel,
+  };
+
+  if (input.onHttpAttempt || input.onHttpError) {
+    clientOptions.fetch = createTelemetryFetch({
+      onHttpAttempt: input.onHttpAttempt,
+      onHttpError: input.onHttpError,
+    });
+  }
+
+  return new OpenAI(clientOptions);
+}
+
+function createTelemetryFetch(input: {
+  onHttpAttempt?: CreateOpenAiClientInput["onHttpAttempt"];
+  onHttpError?: CreateOpenAiClientInput["onHttpError"];
+}): typeof fetch {
+  const baseFetch = globalThis.fetch.bind(globalThis);
+  let attempt = 0;
+
+  return async (url, init) => {
+    attempt += 1;
+    const method = resolveHttpMethod(url, init);
+    const resolvedUrl = resolveHttpUrl(url);
+    input.onHttpAttempt?.({
+      attempt,
+      method,
+      url: resolvedUrl,
+    });
+    try {
+      return await baseFetch(url, init);
+    } catch (error) {
+      input.onHttpError?.({
+        attempt,
+        method,
+        url: resolvedUrl,
+        error,
+      });
+      throw error;
+    }
+  };
+}
+
+function resolveHttpUrl(url: Parameters<typeof fetch>[0]): string {
+  if (typeof url === "string") {
+    return url;
+  }
+  if (url instanceof URL) {
+    return url.toString();
+  }
+  if (url instanceof Request) {
+    return url.url;
+  }
+  return "unknown";
+}
+
+function resolveHttpMethod(url: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1]): string {
+  if (typeof init?.method === "string" && init.method.trim()) {
+    return init.method.trim().toUpperCase();
+  }
+  if (url instanceof Request && typeof url.method === "string" && url.method.trim()) {
+    return url.method.trim().toUpperCase();
+  }
+  return "GET";
+}
+
+function normalizeMaxRetries(value: number | undefined): number {
+  if (value === undefined) {
+    return DEFAULT_OPENAI_MAX_RETRIES;
+  }
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error("OpenAI maxRetries must be a non-negative integer");
+  }
+  return value;
+}
+
+function extractTransportErrorFields(error: unknown): Record<string, unknown> {
+  const fields: Record<string, unknown> = {};
+  const parts = extractDiagnosticParts(error);
+  for (const [key, value] of parts) {
+    fields[key] = value;
+  }
+  return fields;
+}
+
+function extractDiagnosticParts(error: unknown): Array<[string, string]> {
+  const root = toObjectRecord(error);
+  if (!root) {
+    return [];
+  }
+
+  const parts: Array<[string, string]> = [];
+  let cursor: Record<string, unknown> | null = root;
+  let depth = 0;
+  while (cursor && depth < 4) {
+    const label = depth === 0 ? "" : `cause${depth}_`;
+    appendStringPart(parts, `${label}name`, readStringProperty(cursor, "name"));
+    appendStringPart(parts, `${label}code`, readStringProperty(cursor, "code"));
+    appendStringPart(parts, `${label}message`, compact(readStringProperty(cursor, "message"), 160));
+    appendStringPart(parts, `${label}errno`, readNumberOrStringProperty(cursor, "errno"));
+    appendStringPart(parts, `${label}syscall`, readStringProperty(cursor, "syscall"));
+    appendStringPart(parts, `${label}type`, readStringProperty(cursor, "type"));
+    cursor = readObjectProperty(cursor, "cause");
+    depth += 1;
+  }
+
+  const undiciCode = parts.find(([key, value]) => key.endsWith("code") && /^UND_ERR_/.test(value))?.[1] ?? "";
+  appendStringPart(parts, "undici_code", undiciCode);
+
+  return dedupeParts(parts);
+}
+
+function appendStringPart(parts: Array<[string, string]>, key: string, value: string): void {
+  if (!value) {
+    return;
+  }
+  parts.push([key, value]);
+}
+
+function dedupeParts(parts: Array<[string, string]>): Array<[string, string]> {
+  const seen = new Set<string>();
+  const output: Array<[string, string]> = [];
+  for (const part of parts) {
+    const signature = `${part[0]}=${part[1]}`;
+    if (seen.has(signature)) {
+      continue;
+    }
+    seen.add(signature);
+    output.push(part);
+  }
+  return output;
+}
+
+function compact(value: string, maxLength: number): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return normalized.slice(0, maxLength);
 }
 
 export function classifyOpenAiError(error: unknown): LlmProviderErrorClassification | null {
@@ -104,7 +301,7 @@ export function classifyOpenAiError(error: unknown): LlmProviderErrorClassificat
     return {
       errorCode: "llm_timeout",
       retriable: true,
-      errorSummary: sanitizeSummary(error.message),
+      errorSummary: sanitizeSummary(error),
     };
   }
 
@@ -112,7 +309,7 @@ export function classifyOpenAiError(error: unknown): LlmProviderErrorClassificat
     return {
       errorCode: "llm_network_error",
       retriable: true,
-      errorSummary: sanitizeSummary(error.message),
+      errorSummary: sanitizeSummary(error),
     };
   }
 
@@ -307,11 +504,90 @@ function sanitizeSummary(error: unknown): string {
       ? (error as { message: string }).message
       : null;
   const raw = error instanceof Error ? error.message : (message ?? String(error ?? "llm_provider_failed"));
-  const compact = raw.replace(/\s+/g, " ").trim();
+  const compactBase = raw.replace(/\s+/g, " ").trim();
+  const diagnostics = extractDiagnosticContext(error);
+  const compact = diagnostics ? `${compactBase} [${diagnostics}]` : compactBase;
   if (!compact) {
     return "llm_provider_failed";
   }
   return compact.slice(0, 280);
+}
+
+function extractDiagnosticContext(error: unknown): string {
+  const root = toObjectRecord(error);
+  if (!root) {
+    return "";
+  }
+
+  const parts: string[] = [];
+
+  let cursor: Record<string, unknown> | null = root;
+  let depth = 0;
+  while (cursor && depth < 3) {
+    const label = depth === 0 ? "" : `cause${depth}_`;
+    const code = readStringProperty(cursor, "code");
+    if (code) {
+      parts.push(`${label}code=${code}`);
+    }
+
+    const errno = readNumberOrStringProperty(cursor, "errno");
+    if (errno) {
+      parts.push(`${label}errno=${errno}`);
+    }
+
+    const syscall = readStringProperty(cursor, "syscall");
+    if (syscall) {
+      parts.push(`${label}syscall=${syscall}`);
+    }
+
+    cursor = readObjectProperty(cursor, "cause");
+    depth += 1;
+  }
+
+  return [...new Set(parts)].join(" ");
+}
+
+function toObjectRecord(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function readObjectProperty(value: unknown, key: string): Record<string, unknown> | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const candidate = (value as Record<string, unknown>)[key];
+  if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+    return null;
+  }
+  return candidate as Record<string, unknown>;
+}
+
+function readStringProperty(value: unknown, key: string): string {
+  if (typeof value !== "object" || value === null) {
+    return "";
+  }
+  const candidate = (value as Record<string, unknown>)[key];
+  if (typeof candidate !== "string") {
+    return "";
+  }
+  return candidate.trim();
+}
+
+function readNumberOrStringProperty(value: unknown, key: string): string {
+  if (typeof value !== "object" || value === null) {
+    return "";
+  }
+  const candidate = (value as Record<string, unknown>)[key];
+  if (typeof candidate === "number" && Number.isFinite(candidate)) {
+    return String(candidate);
+  }
+  if (typeof candidate === "string") {
+    return candidate.trim();
+  }
+  return "";
 }
 
 const RETRIABLE_NETWORK_ERROR_CODES = new Set([

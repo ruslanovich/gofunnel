@@ -17,6 +17,8 @@ export type LlmProviderConfig = {
   model: string;
   apiKey: string;
   timeoutMs: number;
+  disableOuterTimeout: boolean;
+  outerTimeoutMsOverride: number | null;
 };
 
 export type AnalyzeTranscriptInput = {
@@ -101,6 +103,8 @@ export function loadLlmProviderConfig(env: NodeJS.ProcessEnv = process.env): Llm
   const apiKey = env.LLM_API_KEY?.trim() ?? "";
 
   const timeoutMs = parseOptionalPositiveInteger(env.LLM_TIMEOUT_MS, DEFAULT_LLM_TIMEOUT_MS);
+  const disableOuterTimeout = parseBooleanEnv(env.LLM_DISABLE_OUTER_TIMEOUT, false);
+  const outerTimeoutMsOverride = parseOptionalPositiveIntegerOrNull(env.LLM_OUTER_TIMEOUT_MS);
 
   if (nodeEnv === "production" && provider === "fake") {
     throw new Error("LLM fake provider is not allowed in production");
@@ -119,6 +123,8 @@ export function loadLlmProviderConfig(env: NodeJS.ProcessEnv = process.env): Llm
     model,
     apiKey,
     timeoutMs,
+    disableOuterTimeout,
+    outerTimeoutMsOverride,
   };
 }
 
@@ -135,20 +141,20 @@ class ConfiguredLlmAdapter implements LlmAdapter {
       schemaVersion: input.schemaVersion,
     });
     const timeoutMs = normalizeTimeoutMs(input.timeoutMs, this.config.timeoutMs);
+    const outerTimeoutMs = resolveOuterTimeoutMs(timeoutMs, this.config);
 
     try {
-      const providerOutput = await withTimeout(
-        this.provider.analyze({
-          transcriptText,
-          promptText: loadReportPromptText(versions.promptVersion),
-          promptVersion: versions.promptVersion,
-          schemaVersion: versions.schemaVersion,
-          model: this.config.model,
-          apiKey: this.config.apiKey,
-          timeoutMs,
-        }),
+      const providerPromise = this.provider.analyze({
+        transcriptText,
+        promptText: loadReportPromptText(versions.promptVersion),
+        promptVersion: versions.promptVersion,
+        schemaVersion: versions.schemaVersion,
+        model: this.config.model,
+        apiKey: this.config.apiKey,
         timeoutMs,
-      );
+      });
+      const providerOutput =
+        outerTimeoutMs === null ? await providerPromise : await withTimeout(providerPromise, outerTimeoutMs);
 
       const rawText = normalizeRequiredText(providerOutput.rawText, "rawText");
       const parsedJson = providerOutput.parsedJson ?? parseRawJson(rawText);
@@ -284,6 +290,45 @@ function parseOptionalPositiveInteger(value: string | undefined, fallback: numbe
     throw new Error("LLM_TIMEOUT_MS must be a positive integer");
   }
   return parsed;
+}
+
+function parseOptionalPositiveIntegerOrNull(value: string | undefined): number | null {
+  const normalized = value?.trim();
+  if (!normalized) {
+    return null;
+  }
+  if (!/^\d+$/.test(normalized)) {
+    throw new Error("LLM_OUTER_TIMEOUT_MS must be a positive integer");
+  }
+  const parsed = Number(normalized);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new Error("LLM_OUTER_TIMEOUT_MS must be a positive integer");
+  }
+  return parsed;
+}
+
+function parseBooleanEnv(value: string | undefined, fallback: boolean): boolean {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) {
+    return fallback;
+  }
+  if (normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on") {
+    return true;
+  }
+  if (normalized === "0" || normalized === "false" || normalized === "no" || normalized === "off") {
+    return false;
+  }
+  throw new Error("LLM_DISABLE_OUTER_TIMEOUT must be a boolean");
+}
+
+function resolveOuterTimeoutMs(innerTimeoutMs: number, config: LlmProviderConfig): number | null {
+  if (config.disableOuterTimeout) {
+    return null;
+  }
+  if (config.outerTimeoutMsOverride !== null) {
+    return config.outerTimeoutMsOverride;
+  }
+  return innerTimeoutMs;
 }
 
 function sanitizeErrorCode(code: string): string {

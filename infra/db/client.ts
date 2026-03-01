@@ -18,8 +18,25 @@ export function createPgClient(): Client {
 }
 
 export function createPgPool(applicationName = "gofunnel-http"): Pool {
-  return new Pool({
+  const pool = new Pool({
     connectionString: getDatabaseUrl(),
     application_name: applicationName,
   });
+
+  // Prevent process crashes on idle client disconnects (e.g. transient network resets).
+  pool.on("error", (error) => {
+    console.error(
+      JSON.stringify(
+        {
+          event: "pg_pool_idle_client_error",
+          applicationName,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        null,
+        2,
+      ),
+    );
+  });
+
+  return pool;
 }
