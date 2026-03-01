@@ -33,3 +33,7 @@
 - `docs/05_decisions/2026-02-27_adr-0009_report-storage-model.md`
 - `docs/05_decisions/2026-02-27_adr-0010_retry-backoff-policy.md`
 - `docs/05_decisions/2026-02-27_adr-0011_llm-schema-validation-integration.md`
+
+Текущие ADR (Epic 4):
+
+- `docs/05_decisions/2026-03-02_adr-0012_epic-4-ui-refresh-v0-integration.md`

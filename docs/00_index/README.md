@@ -18,6 +18,7 @@
 - Yandex Object Storage runbook: `docs/04_runbooks/yandex_object_storage.md`
 - Admin bootstrap + migrations runbook: `docs/04_runbooks/admin_bootstrap.md`
 - Staging VPS deploy/smoke runbook: `docs/04_runbooks/staging_vps_github_actions.md`
+- Epic 4 UI smoke matrix runbook: `docs/04_runbooks/2026-03-02_epic-4-ui-smoke-matrix.md`
 - ADR template: `docs/05_decisions/ADR_TEMPLATE.md`
 - Execution plan template: `docs/03_execution_plans/PLAN_TEMPLATE.md`
 
@@ -56,6 +57,20 @@
 - ADR-0009 Report storage model: `docs/05_decisions/2026-02-27_adr-0009_report-storage-model.md`
 - ADR-0010 Retry/backoff policy: `docs/05_decisions/2026-02-27_adr-0010_retry-backoff-policy.md`
 - ADR-0011 LLM + schema validation integration: `docs/05_decisions/2026-02-27_adr-0011_llm-schema-validation-integration.md`
+
+## Recent planning artifacts (2026-03-02)
+
+- Epic 4 execution plan (UI refresh RU by v0 reference): `docs/03_execution_plans/2026-03-02_epic-4-ui-refresh-v0-reference-ru.md`
+- Epic 4 PR-4.1 execution plan (UI foundation layout/tokens/helpers): `docs/03_execution_plans/2026-03-02_pr-4-1-ui-foundation-layout-tokens-helpers.md`
+- Epic 4 PR-4.2 execution plan (Login + Request Access RU forms/error UX): `docs/03_execution_plans/2026-03-02_pr-4-2-login-request-access-ru-v0.md`
+- Epic 4 PR-4.3 execution plan (Dashboard table refresh v0-like, RU placeholders): `docs/03_execution_plans/2026-03-02_pr-4-3-dashboard-v0-table-ru.md`
+- Epic 4 PR-4.4 execution plan (File details overlay v0-like modal + RU states): `docs/03_execution_plans/2026-03-02_pr-4-4-file-details-overlay-v0-ru.md`
+- Epic 4 PR-4.5 execution plan (Admin pages v0-like refresh, RU, no API changes): `docs/03_execution_plans/2026-03-02_pr-4-5-admin-access-requests-users-v0-ru.md`
+- Epic 4 PR-4.6 execution plan (UI polish closeout: consistency, RU copy, placeholders, smoke): `docs/03_execution_plans/2026-03-02_pr-4-6-ui-polish-closeout-consistency-ru-placeholders-smoke.md`
+- Epic 4 PR-4.7 execution plan (report overlay: JSON -> HTML rendering): `docs/03_execution_plans/2026-03-02_pr-4-7-report-html-overlay-render.md`
+- Epic 4 PR-4.8 execution plan (report overlay visual relayout, day theme): `docs/03_execution_plans/2026-03-02_pr-4-8-report-overlay-visual-relayout-day-theme.md`
+- Epic 4 smoke matrix runbook: `docs/04_runbooks/2026-03-02_epic-4-ui-smoke-matrix.md`
+- ADR-0012 Epic 4 UI refresh integration strategy: `docs/05_decisions/2026-03-02_adr-0012_epic-4-ui-refresh-v0-integration.md`
 
 ## Важные корневые документы
 

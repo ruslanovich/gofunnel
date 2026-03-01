@@ -34,3 +34,12 @@
 - `docs/03_execution_plans/2026-02-27_pr-dx-node-lts-runtime-pin.md`
 - `docs/03_execution_plans/2026-02-27_pr-3-1i-llm-transport-root-cause-diagnostics.md`
 - `docs/03_execution_plans/2026-02-27_pr-dx-staging-env-vps-actions.md`
+- `docs/03_execution_plans/2026-03-02_epic-4-ui-refresh-v0-reference-ru.md`
+- `docs/03_execution_plans/2026-03-02_pr-4-1-ui-foundation-layout-tokens-helpers.md`
+- `docs/03_execution_plans/2026-03-02_pr-4-2-login-request-access-ru-v0.md`
+- `docs/03_execution_plans/2026-03-02_pr-4-3-dashboard-v0-table-ru.md`
+- `docs/03_execution_plans/2026-03-02_pr-4-4-file-details-overlay-v0-ru.md`
+- `docs/03_execution_plans/2026-03-02_pr-4-5-admin-access-requests-users-v0-ru.md`
+- `docs/03_execution_plans/2026-03-02_pr-4-6-ui-polish-closeout-consistency-ru-placeholders-smoke.md`
+- `docs/03_execution_plans/2026-03-02_pr-4-7-report-html-overlay-render.md`
+- `docs/03_execution_plans/2026-03-02_pr-4-8-report-overlay-visual-relayout-day-theme.md`

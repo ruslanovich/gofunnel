@@ -21,3 +21,5 @@ coverage/
 
 # Temporary
 tmp/
+.tmp/
+.tmp/gofunnel-v0-design-system/

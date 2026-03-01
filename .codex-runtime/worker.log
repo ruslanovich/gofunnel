@@ -1,0 +1,4 @@
+
+> gofunnel@0.1.0 worker:start:local
+> DOTENV_CONFIG_PATH=.env.local tsx interfaces/cli/worker_start.ts
+
