@@ -3220,10 +3220,14 @@ test("authenticated /share/<token> returns standalone report page for valid lega
   assert.match(html, /id="deal"/);
   assert.match(html, /id="pilot"/);
   assert.match(html, /id="product"/);
-  assert.match(html, /Развернуть всё/);
-  assert.match(html, /Свернуть всё/);
-  assert.match(html, /Печать \/ PDF/);
-  assert.match(html, /toggleAll\(true\)/);
+  assert.match(html, /Метаданные/);
+  assert.match(html, /Паспорт сделки/);
+  assert.match(html, /Коммерческий трек/);
+  assert.match(html, /Пилотирование/);
+  assert.match(html, /Продуктовый трек/);
+  assert.doesNotMatch(html, /Развернуть всё/);
+  assert.doesNotMatch(html, /Свернуть всё/);
+  assert.doesNotMatch(html, /Печать \/ PDF/);
   assert.match(html, /schema unknown/);
 });
 
@@ -3371,12 +3375,235 @@ test("authenticated /files/<id>/report returns standalone report html document",
   assert.match(html, /id="deal"/);
   assert.match(html, /id="pilot"/);
   assert.match(html, /id="product"/);
-  assert.match(html, /Развернуть всё/);
-  assert.match(html, /Свернуть всё/);
-  assert.match(html, /Печать \/ PDF/);
+  assert.match(html, /Метаданные/);
+  assert.match(html, /Паспорт сделки/);
+  assert.match(html, /Коммерческий трек/);
+  assert.match(html, /Пилотирование/);
+  assert.match(html, /Продуктовый трек/);
+  assert.doesNotMatch(html, /Развернуть всё/);
+  assert.doesNotMatch(html, /Свернуть всё/);
+  assert.doesNotMatch(html, /Печать \/ PDF/);
   assert.match(html, /schema v2/);
   assert.match(html, /follow-up/);
-  assert.match(html, /<details open>/);
+  assert.match(html, /<section class="card" id="meta">\s*<details>/);
+  assert.doesNotMatch(html, /<section class="card" id="meta">\s*<details open>/);
+  assert.match(html, /<section class="card" id="pilot">\s*<details>/);
+  assert.doesNotMatch(html, /<section class="card" id="pilot">\s*<details open>/);
+});
+
+test("standalone report page renders schema-aware v2 fields", async () => {
+  const harness = createHarness();
+  const { user, cookie } = seedAuthenticatedSession(harness, {
+    email: "member@example.com",
+  });
+  const { baseUrl } = await harness.start();
+  const fileId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1";
+  const reportKey = `users/${user.id}/files/${fileId}/report.json`;
+
+  seedUploadedFileRow(harness, {
+    id: fileId,
+    userId: user.id,
+    originalFilename: "schema-aware.txt",
+    extension: "txt",
+    sizeBytes: 2048,
+    status: "succeeded",
+    storageKeyReport: reportKey,
+    createdAt: new Date("2026-02-27T12:00:00.000Z"),
+  });
+  harness.fileStorage.seedObjectText(reportKey, JSON.stringify({
+    meta: {
+      schema_version: "1.0",
+      source: {
+        transcript_id: "unknown",
+        transcript_format: "txt",
+        has_diarization: false,
+        has_timecodes: false,
+        language: "ru",
+      },
+      meeting_type: {
+        primary: {
+          label: "discovery",
+          confidence: "high",
+        },
+        secondary: [],
+        signals: [
+          {
+            text: "Обсуждение пилота и NDA",
+            evidence: [{ quote: "NDA и пилот", timecode: "00:10" }],
+          },
+        ],
+      },
+      focus_weights: {
+        passport: 0.2,
+        deal_track: 0.25,
+        pilot_poc: 0.25,
+        product_track: 0.3,
+      },
+    },
+    passport: {
+      company: {
+        name: { value: "ACME", status: "present", confidence: "high", evidence: [{ quote: "ACME", timecode: "00:02" }] },
+        group: { value: "Enterprise", status: "present", confidence: "medium", evidence: [{ quote: "Enterprise", timecode: "00:03" }] },
+        industry: { value: "Retail", status: "present", confidence: "medium", evidence: [{ quote: "Retail", timecode: "00:04" }] },
+        contacts: [
+          {
+            person: { value: "Никита", status: "present", confidence: "high", evidence: [{ quote: "Никита", timecode: "00:05" }] },
+            role: { value: "Product owner", status: "present", confidence: "medium", evidence: [{ quote: "Product owner", timecode: "00:06" }] },
+          },
+        ],
+      },
+      offering: {
+        primary_theme: { value: "AI поиск", status: "present", confidence: "high", evidence: [{ quote: "AI поиск", timecode: "00:07" }] },
+        solution_candidates: [
+          { value: "Copilot", status: "present", confidence: "medium", evidence: [{ quote: "Copilot", timecode: "00:08" }] },
+        ],
+      },
+      stage: {
+        value: "discovery",
+        status: "present",
+        confidence: "high",
+        mode: "inferred",
+        evidence: [{ quote: "Discovery", timecode: "00:09" }],
+      },
+    },
+    deal_track: {
+      problem_impact: {
+        items: [
+          { value: "Нет быстрого поиска", status: "present", confidence: "high", evidence: [{ quote: "Нет быстрого поиска", timecode: "00:11" }] },
+        ],
+        missing_questions: [
+          { value: "Целевые KPI", status: "missing", confidence: "medium", evidence: [{ quote: "KPI нет", timecode: "00:12" }] },
+        ],
+      },
+      value_hypothesis: {
+        items: [
+          { value: "Сократить время поиска", status: "present", confidence: "high", evidence: [{ quote: "Сократить время", timecode: "00:13" }] },
+        ],
+        alternatives: [
+          { value: "Внутренняя разработка", status: "uncertain", confidence: "medium", evidence: [{ quote: "Внутренняя разработка", timecode: "00:14" }] },
+        ],
+      },
+      decision_people: {
+        roles: {
+          decision_maker: { value: "CTO", status: "present", confidence: "medium", evidence: [{ quote: "CTO", timecode: "00:15" }] },
+          champion: { value: "Head of AI", status: "present", confidence: "medium", evidence: [{ quote: "Head of AI", timecode: "00:16" }] },
+          owner: { value: "PM", status: "present", confidence: "medium", evidence: [{ quote: "PM", timecode: "00:17" }] },
+          blocker: { value: "Security", status: "present", confidence: "medium", evidence: [{ quote: "Security", timecode: "00:18" }] },
+        },
+        process: [
+          { value: "NDA -> pilot -> rollout", status: "present", confidence: "high", evidence: [{ quote: "NDA", timecode: "00:19" }] },
+        ],
+      },
+      timing_trigger: {
+        items: [
+          { value: "Пилот по файлам", status: "present", confidence: "high", evidence: [{ quote: "Пилот", timecode: "00:20" }] },
+        ],
+        cadence: {
+          next_contact: { value: "На неделе", status: "uncertain", confidence: "medium", evidence: [{ quote: "На неделе", timecode: "00:21" }] },
+          deliverable: { value: "Список требований", status: "present", confidence: "high", evidence: [{ quote: "Список требований", timecode: "00:22" }] },
+        },
+      },
+      money_procurement: {
+        budget: { value: "не обсуждался", status: "not_discussed", confidence: "medium", evidence: [{ quote: "Бюджет позже", timecode: "00:23" }] },
+        unit_economics: [
+          { value: "Оплата за токены", status: "present", confidence: "medium", evidence: [{ quote: "Токены", timecode: "00:24" }] },
+        ],
+        procurement: [
+          { value: "Через procurement", status: "present", confidence: "medium", evidence: [{ quote: "Procurement", timecode: "00:25" }] },
+        ],
+        price_sensitivity: [
+          { value: "Нужен расчет TCO", status: "present", confidence: "medium", evidence: [{ quote: "TCO", timecode: "00:26" }] },
+        ],
+      },
+      momentum_next_step: {
+        commitments: [
+          {
+            actor: { value: "client", status: "present", confidence: "high", evidence: [{ quote: "Клиент", timecode: "00:27" }] },
+            action: { value: "Подготовить требования", status: "present", confidence: "high", evidence: [{ quote: "Требования", timecode: "00:28" }] },
+            when: { value: "На неделе", status: "uncertain", confidence: "medium", evidence: [{ quote: "На неделе", timecode: "00:29" }] },
+          },
+        ],
+        next_step: {
+          what: { value: "Подписать NDA", status: "present", confidence: "high", evidence: [{ quote: "NDA", timecode: "00:30" }] },
+          when: { value: "После юр. согласования", status: "uncertain", confidence: "medium", evidence: [{ quote: "После юр.", timecode: "00:31" }] },
+          goal: { value: "Запустить пилот", status: "present", confidence: "high", evidence: [{ quote: "Пилот", timecode: "00:32" }] },
+        },
+      },
+      security_compliance_data: {
+        items: [
+          { value: "PII фильтрация", status: "present", confidence: "high", evidence: [{ quote: "PII", timecode: "00:33" }] },
+        ],
+        missing_questions: [
+          { value: "Список нормативов", status: "missing", confidence: "medium", evidence: [{ quote: "Нормативы", timecode: "00:34" }] },
+        ],
+      },
+    },
+    pilot_poc: {
+      status: { value: "present", status: "present", confidence: "high", evidence: [{ quote: "Пилот есть", timecode: "00:35" }] },
+      goal: { value: "Проверить качество поиска", status: "present", confidence: "high", evidence: [{ quote: "Проверить поиск", timecode: "00:36" }] },
+      scope: [{ value: "PDF/Docx", status: "present", confidence: "high", evidence: [{ quote: "PDF/Docx", timecode: "00:37" }] }],
+      inputs_from_client: [{ value: "Набор документов", status: "present", confidence: "high", evidence: [{ quote: "Документы", timecode: "00:38" }] }],
+      outputs_from_vendor: [{ value: "Демо", status: "present", confidence: "high", evidence: [{ quote: "Демо", timecode: "00:39" }] }],
+      success_criteria: [{ value: "Релевантные ответы", status: "present", confidence: "high", evidence: [{ quote: "Релевантность", timecode: "00:40" }] }],
+      timeline_checkpoints: [{ value: "2 недели", status: "uncertain", confidence: "medium", evidence: [{ quote: "2 недели", timecode: "00:41" }] }],
+      owners: {
+        client_owner: { value: "Никита", status: "present", confidence: "high", evidence: [{ quote: "Никита", timecode: "00:42" }] },
+        vendor_owner: { value: "Murad", status: "present", confidence: "high", evidence: [{ quote: "Murad", timecode: "00:43" }] },
+      },
+    },
+    product_track: {
+      use_case: {
+        items: [{ value: "Поиск по документам", status: "present", confidence: "high", evidence: [{ quote: "Поиск", timecode: "00:44" }] }],
+      },
+      requirements: {
+        functional: [{ value: "Индексация", status: "present", confidence: "high", evidence: [{ quote: "Индексация", timecode: "00:45" }] }],
+        non_functional: [{ value: "Производительность", status: "present", confidence: "high", evidence: [{ quote: "Производительность", timecode: "00:46" }] }],
+        data_integrations: [{ value: "S3 connector", status: "present", confidence: "high", evidence: [{ quote: "S3", timecode: "00:47" }] }],
+      },
+      constraints: {
+        items: [{ value: "DMZ", status: "present", confidence: "high", evidence: [{ quote: "DMZ", timecode: "00:48" }] }],
+      },
+      implementation: {
+        items: [{ value: "Pilot then rollout", status: "present", confidence: "high", evidence: [{ quote: "Pilot then rollout", timecode: "00:49" }] }],
+      },
+      success_criteria: {
+        items: [{ value: "Релевантность > 80%", status: "present", confidence: "high", evidence: [{ quote: "80%", timecode: "00:50" }] }],
+      },
+      open_questions_risks: {
+        items: [{ value: "Бюджет", status: "missing", confidence: "medium", evidence: [{ quote: "Бюджет", timecode: "00:51" }] }],
+      },
+    },
+  }));
+
+  const response = await fetch(`${baseUrl}/files/${fileId}/report`, {
+    headers: {
+      Cookie: cookie,
+    },
+  });
+
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /<span class=\"chip\">passport: 0[\\.,]2<\/span>/);
+  assert.match(html, /<strong>Никита<\/strong> — Product owner/);
+  assert.match(html, /✅ items: 1/);
+  assert.match(html, /⚠️ missing: 1/);
+  assert.match(html, /Потребности клиента/);
+  assert.match(html, /Ценностное предложение/);
+  assert.match(html, /Принятие решений/);
+  assert.match(html, /Шаги и сроки/);
+  assert.match(html, /Бюджет и закупка/);
+  assert.match(html, /Договоренности/);
+  assert.match(html, /Безопасность/);
+  assert.match(html, /<span class='mono'>client<\/span>: Подготовить требования/);
+  assert.match(html, /class=\"cards-3\"/);
+  assert.match(html, /<h3>Требования<\/h3>/);
+  assert.match(html, /<h4>Функциональные<\/h4>/);
+  assert.match(html, /<h4>Нефункциональные<\/h4>/);
+  assert.match(html, /<h4>Данные и интеграцияя<\/h4>/);
+  assert.match(html, /<h3>Ограничители<\/h3>/);
+  assert.match(html, /<h3>Имплементация<\/h3>/);
+  assert.match(html, /<h3>Критерии успеха<\/h3>/);
+  assert.match(html, /<h3>Открытые вопросы \/ риски<\/h3>/);
 });
 
 test("access request success creates row with status new", async () => {

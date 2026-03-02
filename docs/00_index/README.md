@@ -19,6 +19,7 @@
 - Admin bootstrap + migrations runbook: `docs/04_runbooks/admin_bootstrap.md`
 - Staging VPS deploy/smoke runbook: `docs/04_runbooks/staging_vps_github_actions.md`
 - Epic 4 UI smoke matrix runbook: `docs/04_runbooks/2026-03-02_epic-4-ui-smoke-matrix.md`
+- Local HTTP start/restart runbook: `docs/04_runbooks/local_http_start_restart.md`
 - ADR template: `docs/05_decisions/ADR_TEMPLATE.md`
 - Execution plan template: `docs/03_execution_plans/PLAN_TEMPLATE.md`
 

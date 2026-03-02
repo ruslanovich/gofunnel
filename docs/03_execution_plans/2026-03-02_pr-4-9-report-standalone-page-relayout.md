@@ -14,7 +14,7 @@
 
 ## Assumptions / research inputs
 
-- В текущем коде `/share/:token` отдаёт placeholder; structured report рендерится в JS overlay внутри `/app`.
+- На текущий момент `/share/:token` и `/files/:id/report` уже отдают standalone HTML через `render_report_page.ts`; основной remaining scope — schema-aware relayout до эталона `report_relayout.html`.
 - External research (MCP Context7):
   - MDN `/mdn/content`: для untrusted строк использовать `createElement` + `textContent`; избегать `innerHTML`.
   - Node.js `/nodejs/node`: для HTML-ответа использовать `Content-Type: text/html; charset=utf-8`.
