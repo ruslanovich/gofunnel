@@ -43,3 +43,4 @@
 - `docs/03_execution_plans/2026-03-02_pr-4-6-ui-polish-closeout-consistency-ru-placeholders-smoke.md`
 - `docs/03_execution_plans/2026-03-02_pr-4-7-report-html-overlay-render.md`
 - `docs/03_execution_plans/2026-03-02_pr-4-8-report-overlay-visual-relayout-day-theme.md`
+- `docs/03_execution_plans/2026-03-02_pr-4-9-report-standalone-page-relayout.md`

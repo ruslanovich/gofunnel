@@ -1268,6 +1268,7 @@ function createAppDashboardScriptHarness(input: {
   overlayFooter: FakeHTMLElement;
   fetchCalls: string[];
   remainingFetchExpectations: () => number;
+  lastAssignedLocation: () => string | null;
   clickFirstRow: () => void;
   closeOverlayByHeaderButton: () => void;
   closeOverlayByFooterButton: () => void;
@@ -1379,6 +1380,14 @@ function createAppDashboardScriptHarness(input: {
   const setIntervalCalls: Array<() => void> = [];
   let nextTimeoutId = 0;
   const timeoutCallbacks = new Map<number, () => void>();
+  let assignedLocation: string | null = null;
+  const locationObject = {
+    href: "",
+    assign(url: string): void {
+      assignedLocation = url;
+      locationObject.href = url;
+    },
+  };
   const windowObject = {
     setInterval(callback: () => void): number {
       setIntervalCalls.push(callback);
@@ -1392,6 +1401,7 @@ function createAppDashboardScriptHarness(input: {
     clearTimeout(timeoutId: number): void {
       timeoutCallbacks.delete(timeoutId);
     },
+    location: locationObject,
   };
 
   runInNewContext(script, {
@@ -1422,6 +1432,7 @@ function createAppDashboardScriptHarness(input: {
     overlayFooter,
     fetchCalls,
     remainingFetchExpectations: () => fetchExpectations.length,
+    lastAssignedLocation: () => assignedLocation,
     clickFirstRow: () => {
       const firstRow = filesBody.children[0];
       assert.ok(firstRow, "expected at least one file row rendered");
@@ -1736,7 +1747,7 @@ test("app dashboard shows RU error state and retry button when first list load f
   assert.equal(dashboard.remainingFetchExpectations(), 0);
 });
 
-test("app overlay renders report json for succeeded file status", async () => {
+test("app succeeded file opens standalone report page directly", async () => {
   const harness = createHarness();
   const { cookie } = seedAuthenticatedSession(harness, {
     email: "member@example.com",
@@ -1769,35 +1780,6 @@ test("app overlay renders report json for succeeded file status", async () => {
           next_cursor: null,
         },
       },
-      {
-        url: "/api/files/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
-        status: 200,
-        body: {
-          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
-          original_filename: "ready.txt",
-          extension: "txt",
-          size_bytes: 123,
-          created_at: "2026-02-27T14:00:00.000Z",
-          status: "succeeded",
-          error_code: null,
-          error_message: null,
-        },
-      },
-      {
-        url: "/api/files/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1/report",
-        status: 200,
-        body: {
-          summary: "done",
-          confidence: 0.98,
-          raw_llm_output: "top-secret",
-          sections: {
-            outcome: "ok",
-            raw_llm_output: {
-              skipped: true,
-            },
-          },
-        },
-      },
     ],
   });
 
@@ -1805,26 +1787,15 @@ test("app overlay renders report json for succeeded file status", async () => {
   dashboard.clickFirstRow();
   await dashboard.flush();
 
-  assert.equal(dashboard.overlay.hidden, false);
-  assert.equal(dashboard.overlayTitle.textContent, "ready.txt");
-  assert.equal(dashboard.overlayBadge.textContent, "Готово");
-  assert.equal(dashboard.overlayStatus.textContent, "Готово");
-  assert.equal((dashboard.overlayContent as { className?: string }).className, "gf-report-view");
-  const overlayReportText =
-    (dashboard.overlayContent as { __reportText?: string }).__reportText ??
-    dashboard.overlayContent.textContent;
-  assert.match(overlayReportText, /summary/i);
-  assert.match(overlayReportText, /done/);
-  assert.match(overlayReportText, /confidence/i);
-  assert.match(overlayReportText, /0[.,]98/);
-  assert.match(overlayReportText, /outcome/i);
-  assert.match(overlayReportText, /ok/);
-  assert.doesNotMatch(overlayReportText, /raw_llm_output/);
-  assert.equal(dashboard.overlayErrorSection.hidden, true);
+  assert.equal(dashboard.overlay.hidden, true);
+  assert.equal(
+    dashboard.lastAssignedLocation(),
+    "/files/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1/report",
+  );
   assert.equal(dashboard.remainingFetchExpectations(), 0);
 });
 
-test("app overlay shows not ready message when report endpoint returns 409", async () => {
+test("app overlay keeps processing state for non-succeeded file and does not redirect", async () => {
   const harness = createHarness();
   const { cookie } = seedAuthenticatedSession(harness, {
     email: "member@example.com",
@@ -1850,7 +1821,7 @@ test("app overlay shows not ready message when report endpoint returns 409", asy
               id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
               original_filename: "processing.txt",
               created_at: "2026-02-27T14:00:00.000Z",
-              status: "succeeded",
+              status: "processing",
               size_bytes: 123,
             },
           ],
@@ -1866,16 +1837,15 @@ test("app overlay shows not ready message when report endpoint returns 409", asy
           extension: "txt",
           size_bytes: 123,
           created_at: "2026-02-27T14:00:00.000Z",
-          status: "succeeded",
+          status: "processing",
+          processing_attempts: 1,
+          attempts: 1,
+          max_attempts: 4,
+          next_run_at: "2026-02-27T14:02:00.000Z",
+          last_error_code: "llm_timeout",
+          last_error_message: "timeout",
           error_code: null,
           error_message: null,
-        },
-      },
-      {
-        url: "/api/files/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1/report",
-        status: 409,
-        body: {
-          error: "report_not_ready",
         },
       },
     ],
@@ -1888,7 +1858,8 @@ test("app overlay shows not ready message when report endpoint returns 409", asy
   assert.equal(dashboard.overlay.hidden, false);
   assert.equal(dashboard.overlayBadge.textContent, "В обработке");
   assert.equal(dashboard.overlayStatus.textContent, "Обрабатываем файл…");
-  assert.match(dashboard.overlayContent.textContent, /Ожидаем подготовку отчёта/);
+  assert.equal(dashboard.lastAssignedLocation(), null);
+  assert.match(dashboard.overlayContent.textContent, /Попытка:\s*1\/4/);
   assert.equal(dashboard.remainingFetchExpectations(), 0);
 });
 
@@ -2226,7 +2197,7 @@ test("non-admin blocked from /admin/*", async () => {
   assert.equal(await response.text(), "admin_only");
 });
 
-test("admin /admin renders unified placeholder with back-to-app action", async () => {
+test("admin /admin redirects to access requests page", async () => {
   const harness = createHarness();
   seedAuthenticatedSession(harness, {
     id: "admin_1",
@@ -2236,15 +2207,12 @@ test("admin /admin renders unified placeholder with back-to-app action", async (
   const { baseUrl } = await harness.start();
 
   const response = await fetch(`${baseUrl}/admin`, {
+    redirect: "manual",
     headers: { Cookie: makeCookieValue("opaque_1") },
   });
 
-  assert.equal(response.status, 200);
-  const html = await response.text();
-  assert.match(html, /<h1 class="gf-page-header__title">Раздел администрирования<\/h1>/);
-  assert.match(html, /Раздел в разработке/);
-  assert.match(html, /Путь: \/admin\./);
-  assert.match(html, /href="\/app"[^>]*>Вернуться в приложение<\/a>/);
+  assert.equal(response.status, 303);
+  assert.equal(response.headers.get("location"), "/admin/access-requests");
 });
 
 test("admin can list access requests via admin api with status filter", async () => {
@@ -3226,7 +3194,7 @@ test("share login redirect preserves exact next path after authentication", asyn
   assert.equal(loginResponse.headers.get("location"), requestedPath);
 });
 
-test("authenticated /share/<token> returns placeholder for valid token", async () => {
+test("authenticated /share/<token> returns standalone report page for valid legacy ref", async () => {
   const harness = createHarness();
   const { cookie } = seedAuthenticatedSession(harness, {
     email: "member@example.com",
@@ -3246,10 +3214,62 @@ test("authenticated /share/<token> returns placeholder for valid token", async (
 
   assert.equal(response.status, 200);
   const html = await response.text();
-  assert.match(html, /Публичный отчёт/);
-  assert.match(html, /Раздел в разработке/);
-  assert.match(html, /href="\/app"[^>]*>Вернуться в приложение<\/a>/);
-  assert.match(html, /report_abc_123/);
+  assert.match(html, /^<!doctype html>/i);
+  assert.match(html, /id="meta"/);
+  assert.match(html, /id="passport"/);
+  assert.match(html, /id="deal"/);
+  assert.match(html, /id="pilot"/);
+  assert.match(html, /id="product"/);
+  assert.match(html, /Развернуть всё/);
+  assert.match(html, /Свернуть всё/);
+  assert.match(html, /Печать \/ PDF/);
+  assert.match(html, /toggleAll\(true\)/);
+  assert.match(html, /schema unknown/);
+});
+
+test("authenticated /share/<token> escapes potentially dangerous report strings", async () => {
+  const harness = createHarness();
+  const { user, cookie } = seedAuthenticatedSession(harness, {
+    email: "member@example.com",
+  });
+  const { baseUrl } = await harness.start();
+  const sharedFileId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
+  const reportKey = `users/${user.id}/files/${sharedFileId}/report.json`;
+
+  seedUploadedFileRow(harness, {
+    id: sharedFileId,
+    userId: user.id,
+    originalFilename: "share-ready.txt",
+    extension: "txt",
+    sizeBytes: 512,
+    status: "succeeded",
+    storageKeyReport: reportKey,
+    createdAt: new Date("2026-02-27T11:00:00.000Z"),
+  });
+  harness.fileStorage.seedObjectText(reportKey, JSON.stringify({
+    meta: {
+      schema_version: "v2",
+    },
+    passport: {
+      customer: "<script>alert(1)</script>",
+    },
+  }));
+  harness.reportShareRepository.seedShare({
+    reportRef: sharedFileId,
+    tokenHash: "hash:share_safe_1",
+    expiresAt: new Date("2026-03-01T00:00:00.000Z"),
+  });
+
+  const response = await fetch(`${baseUrl}/share/share_safe_1`, {
+    headers: {
+      Cookie: cookie,
+    },
+  });
+
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.doesNotMatch(html, /<script>alert\(1\)<\/script>/);
 });
 
 test("authenticated /share/<token> returns 410 for revoked token", async () => {
@@ -3310,6 +3330,53 @@ test("authenticated /share/<token> returns 404 for expired token", async () => {
   });
 
   assert.equal(response.status, 404);
+});
+
+test("authenticated /files/<id>/report returns standalone report html document", async () => {
+  const harness = createHarness();
+  const { user, cookie } = seedAuthenticatedSession(harness, {
+    email: "member@example.com",
+  });
+  const { baseUrl } = await harness.start();
+  const fileId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
+  const reportKey = `users/${user.id}/files/${fileId}/report.json`;
+
+  seedUploadedFileRow(harness, {
+    id: fileId,
+    userId: user.id,
+    originalFilename: "meeting.txt",
+    extension: "txt",
+    sizeBytes: 1234,
+    status: "succeeded",
+    storageKeyReport: reportKey,
+    createdAt: new Date("2026-02-27T12:00:00.000Z"),
+  });
+  harness.fileStorage.seedObjectText(reportKey, JSON.stringify({
+    meta: { schema_version: "v2", source: { transcript_format: "txt", language: "ru" } },
+    passport: { stage: "discovery" },
+    deal_track: { next_step: "follow-up" },
+  }));
+
+  const response = await fetch(`${baseUrl}/files/${fileId}/report`, {
+    headers: {
+      Cookie: cookie,
+    },
+  });
+
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /^<!doctype html>/i);
+  assert.match(html, /id="meta"/);
+  assert.match(html, /id="passport"/);
+  assert.match(html, /id="deal"/);
+  assert.match(html, /id="pilot"/);
+  assert.match(html, /id="product"/);
+  assert.match(html, /Развернуть всё/);
+  assert.match(html, /Свернуть всё/);
+  assert.match(html, /Печать \/ PDF/);
+  assert.match(html, /schema v2/);
+  assert.match(html, /follow-up/);
+  assert.match(html, /<details open>/);
 });
 
 test("access request success creates row with status new", async () => {

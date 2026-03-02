@@ -69,6 +69,7 @@
 - Epic 4 PR-4.6 execution plan (UI polish closeout: consistency, RU copy, placeholders, smoke): `docs/03_execution_plans/2026-03-02_pr-4-6-ui-polish-closeout-consistency-ru-placeholders-smoke.md`
 - Epic 4 PR-4.7 execution plan (report overlay: JSON -> HTML rendering): `docs/03_execution_plans/2026-03-02_pr-4-7-report-html-overlay-render.md`
 - Epic 4 PR-4.8 execution plan (report overlay visual relayout, day theme): `docs/03_execution_plans/2026-03-02_pr-4-8-report-overlay-visual-relayout-day-theme.md`
+- Epic 4 PR-4.9 execution plan (standalone report page relayout, share + app route): `docs/03_execution_plans/2026-03-02_pr-4-9-report-standalone-page-relayout.md`
 - Epic 4 smoke matrix runbook: `docs/04_runbooks/2026-03-02_epic-4-ui-smoke-matrix.md`
 - ADR-0012 Epic 4 UI refresh integration strategy: `docs/05_decisions/2026-03-02_adr-0012_epic-4-ui-refresh-v0-integration.md`
 

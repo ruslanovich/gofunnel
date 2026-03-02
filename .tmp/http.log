@@ -1,7 +1,3 @@
-
-> gofunnel@0.1.0 http:start
-> tsx interfaces/http/server_main.ts
-
 {
   "status": "listening",
   "port": 3000,

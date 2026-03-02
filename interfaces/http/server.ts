@@ -47,6 +47,7 @@ import { buildClearSessionCookie, buildSessionCookie, getSessionCookieValue } fr
 import { isAllowedOriginForStateChange } from "./csrf.js";
 import type { HttpServerConfig } from "./config.js";
 import { loadHttpServerConfig } from "./config.js";
+import { renderReportDocument } from "./report_ui/render_report_page.js";
 import { buttonClassName, renderBadge, renderCard, renderEmptyState } from "./ui/components.js";
 import {
   REPORT_UI_COPY,
@@ -523,6 +524,80 @@ async function handleRequest(
     return;
   }
 
+  if (method === "GET" && pathname.startsWith("/files/")) {
+    const fileId = parseFileIdFromStandaloneReportPath(pathname);
+    if (!fileId) {
+      sendText(res, 404, "Not Found");
+      return;
+    }
+
+    const session = await tryGetSession(req, deps.authService);
+    if (!session) {
+      redirect(res, 303, buildLoginRedirectLocation(buildPathAndQuery(url)));
+      return;
+    }
+
+    if (!isCanonicalUuid(fileId)) {
+      sendJson(res, 400, { error: "invalid_id" });
+      return;
+    }
+
+    try {
+      const report = await deps.fileReportService.getForUser({
+        id: fileId,
+        userId: session.user.id,
+      });
+      if (!report) {
+        sendText(res, 404, "Not Found");
+        return;
+      }
+
+      sendStandaloneHtml(
+        res,
+        200,
+        renderReportDocument({
+          title: "Отчёт по созвону",
+          subtitle: `Файл: ${report.id}`,
+          report: report.report,
+          meta: {
+            reportRef: report.id,
+            source: "app",
+            generatedAt: new Date().toISOString(),
+          },
+        }),
+      );
+      return;
+    } catch (error) {
+      if (error instanceof FileReportError) {
+        if (error.code === "report_not_ready") {
+          sendStandaloneHtml(
+            res,
+            200,
+            renderReportDocument({
+              title: "Отчёт по созвону",
+              subtitle: `Файл: ${fileId} • отчёт ещё не готов`,
+              report: {
+                meta: {
+                  schema_version: "unknown",
+                },
+              },
+              meta: {
+                reportRef: fileId,
+                source: "app",
+                generatedAt: new Date().toISOString(),
+              },
+            }),
+          );
+          return;
+        }
+
+        sendText(res, error.httpStatus, error.code);
+        return;
+      }
+      throw error;
+    }
+  }
+
   if (pathname.startsWith("/api/admin/")) {
     const session = await tryGetSession(req, deps.authService);
     if (!session) {
@@ -695,7 +770,54 @@ async function handleRequest(
 
     try {
       const share = await deps.reportShareService.resolveShareByToken({ token });
-      sendHtml(res, 200, renderSharePlaceholderPage(share.reportRef));
+      let shareReport: unknown = {
+        meta: {
+          schema_version: "unknown",
+        },
+      };
+      let subtitle = `Share ref: ${share.reportRef}`;
+
+      if (isCanonicalUuid(share.reportRef)) {
+        try {
+          const report = await deps.fileReportService.getForUser({
+            id: share.reportRef,
+            userId: session.user.id,
+          });
+          if (report) {
+            shareReport = report.report;
+            subtitle = `Share ref: ${share.reportRef} • готово к просмотру`;
+          } else {
+            subtitle = `Share ref: ${share.reportRef} • отчёт не найден`;
+          }
+        } catch (error) {
+          if (error instanceof FileReportError) {
+            if (error.code === "report_not_ready") {
+              subtitle = `Share ref: ${share.reportRef} • отчёт ещё не готов`;
+            } else {
+              subtitle = `Share ref: ${share.reportRef} • не удалось загрузить отчёт`;
+            }
+          } else {
+            throw error;
+          }
+        }
+      } else {
+        subtitle = `Share ref: ${share.reportRef} • legacy reference`;
+      }
+
+      sendStandaloneHtml(
+        res,
+        200,
+        renderReportDocument({
+          title: "Отчёт по созвону",
+          subtitle,
+          report: shareReport,
+          meta: {
+            reportRef: share.reportRef,
+            source: "share",
+            generatedAt: new Date().toISOString(),
+          },
+        }),
+      );
       return;
     } catch (error) {
       if (error instanceof ShareAccessError) {
@@ -737,6 +859,11 @@ async function handleRequest(
 
     if (session.user.role !== "admin") {
       sendText(res, 403, "admin_only");
+      return;
+    }
+
+    if (method === "GET" && pathname === "/admin") {
+      redirect(res, 303, "/admin/access-requests");
       return;
     }
 
@@ -996,6 +1123,12 @@ function sendHtml(res: ServerResponse, statusCode: number, html: string): void {
   res.statusCode = statusCode;
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.end(renderDocument(html, BASE_UI_CSS));
+}
+
+function sendStandaloneHtml(res: ServerResponse, statusCode: number, htmlDocument: string): void {
+  res.statusCode = statusCode;
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.end(htmlDocument);
 }
 
 function sendText(res: ServerResponse, statusCode: number, body: string): void {
@@ -1622,7 +1755,7 @@ function renderAdminAccessRequestsPage(input: {
     description: "Проверяйте входящие заявки, меняйте статусы и выпускайте приглашения.",
     topNavHtml: `
       <a class="gf-nav-link" href="/admin/users">Пользователи</a>
-      <a class="gf-nav-link" href="/admin">Раздел администрирования</a>
+      <a class="gf-nav-link" href="/app">Вернуться в приложение</a>
     `,
     contentHtml: `
       ${renderCard(`
@@ -2058,7 +2191,7 @@ function renderAdminUsersPage(input: { items: AdminUserListItem[] }): string {
     description: "Управляйте статусами пользователей и доступом к системе.",
     topNavHtml: `
       <a class="gf-nav-link" href="/admin/access-requests">Заявки</a>
-      <a class="gf-nav-link" href="/admin">Раздел администрирования</a>
+      <a class="gf-nav-link" href="/app">Вернуться в приложение</a>
     `,
     contentHtml: `
       ${renderCard(`
@@ -3577,6 +3710,23 @@ function renderAppDashboardPage(session: AuthenticatedSession): string {
             return "—";
           }
 
+          function buildStandaloneReportUrl(fileId) {
+            return "/files/" + encodeURIComponent(fileId) + "/report";
+          }
+
+          function openStandaloneReport(fileId) {
+            const reportUrl = buildStandaloneReportUrl(fileId);
+            if (window && window.location && typeof window.location.assign === "function") {
+              window.location.assign(reportUrl);
+              return true;
+            }
+            if (window && window.location && typeof window.location === "object") {
+              window.location.href = reportUrl;
+              return true;
+            }
+            return false;
+          }
+
           function setOverlayBadge(label, tone) {
             overlayBadge.className = "gf-badge gf-badge--" + (tone || "info");
             overlayBadge.textContent = label;
@@ -3770,58 +3920,12 @@ function renderAppDashboardPage(session: AuthenticatedSession): string {
                 return;
               }
 
-              setOverlayBadge("Готово", "success");
-              setOverlayStatusState("info", "Загрузка…", "Получаем отчёт.");
-              overlayErrorSection.hidden = true;
-              setOverlayContentText("Загрузка…", { placeholder: true });
-              overlayFooter.textContent = "Можно закрыть окно и вернуться позже.";
-              try {
-                const reportResponse = await fetch(
-                  "/api/files/" + encodeURIComponent(fileId) + "/report",
-                  {
-                    headers: {
-                      Accept: "application/json",
-                    },
-                  },
-                );
-
-                if (reportResponse.status === 409) {
-                  let reportPayload = null;
-                  try {
-                    reportPayload = await reportResponse.json();
-                  } catch {}
-
-                  const reportError =
-                    reportPayload && typeof reportPayload.error === "string" ? reportPayload.error : "";
-                  if (reportError === "report_not_ready") {
-                    setOverlayBadge("В обработке", "info");
-                    setOverlayStatusState("info", "Обрабатываем файл…", "Можно закрыть окно и вернуться позже.");
-                    const processingDetails = formatProcessingDetails(payload);
-                    setOverlayContentText(processingDetails || "Ожидаем подготовку отчёта.", { placeholder: false });
-                    overlayFooter.textContent = "Состояние обновляется автоматически каждые 5 секунд.";
-                    scheduleOverlayPolling(fileId);
-                    return;
-                  }
-                }
-
-                if (reportResponse.status === 404) {
-                  applyOverlayNotFoundState();
-                  return;
-                }
-
-                if (!reportResponse.ok) {
-                  applyOverlayUnavailableState("Не удалось загрузить отчёт.");
-                  return;
-                }
-
-                const reportPayload = await reportResponse.json();
-                setOverlayBadge("Готово", "success");
-                setOverlayStatusState("success", "Готово", "Отчёт успешно сформирован.");
-                setOverlayReportContent(reportPayload);
-                overlayFooter.textContent = "Нажмите Esc, чтобы закрыть окно.";
-              } catch {
-                applyOverlayUnavailableState("Не удалось загрузить отчёт.");
+              const redirected = openStandaloneReport(fileId);
+              if (redirected) {
+                closeOverlay();
+                return;
               }
+              applyOverlayUnavailableState("Не удалось открыть страницу отчёта.");
             } catch {
               if (overlayRequestToken !== requestToken || overlayActiveFileId !== fileId) {
                 return;
@@ -3877,6 +3981,10 @@ function renderAppDashboardPage(session: AuthenticatedSession): string {
 
             const openHandler = () => {
               if (!fileId) {
+                return;
+              }
+              if (status === "succeeded") {
+                openStandaloneReport(fileId);
                 return;
               }
               const fileName = item && typeof item.original_filename === "string" ? item.original_filename : "";
@@ -4116,19 +4224,6 @@ function renderProtectedPage(
   });
 }
 
-function renderSharePlaceholderPage(reportRef: string): string {
-  return renderPageLayout({
-    title: "Публичный отчёт",
-    description: UI_COPY.common.featureInDevelopment,
-    narrow: true,
-    contentHtml: renderEmptyState({
-      title: UI_COPY.placeholder.title,
-      description: `Идентификатор отчёта: ${escapeHtml(reportRef)}. ${UI_COPY.common.featureInDevelopment}`,
-      actionHtml: `<a class="${buttonClassName({ variant: "secondary" })}" href="/app">${UI_COPY.common.appBackAction}</a>`,
-    }),
-  });
-}
-
 function serializeAdminAccessRequest(item: AdminAccessRequest): Record<string, string | null> {
   return {
     id: item.id,
@@ -4279,6 +4374,26 @@ function parseFileIdFromPath(pathname: string): string | null {
 
 function parseFileIdFromReportPath(pathname: string): string | null {
   const prefix = "/api/files/";
+  const suffix = "/report";
+  if (!pathname.startsWith(prefix) || !pathname.endsWith(suffix)) {
+    return null;
+  }
+
+  const rawToken = pathname.slice(prefix.length, pathname.length - suffix.length);
+  if (!rawToken || rawToken.includes("/")) {
+    return null;
+  }
+
+  try {
+    const decoded = decodeURIComponent(rawToken).trim();
+    return decoded || null;
+  } catch {
+    return null;
+  }
+}
+
+function parseFileIdFromStandaloneReportPath(pathname: string): string | null {
+  const prefix = "/files/";
   const suffix = "/report";
   if (!pathname.startsWith(prefix) || !pathname.endsWith(suffix)) {
     return null;
