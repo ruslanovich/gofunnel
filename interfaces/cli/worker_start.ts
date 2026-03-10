@@ -8,15 +8,12 @@ import { createOpenAiProvider } from "../../infra/processing/openai_provider.js"
 import { PostgresProcessingJobRepository } from "../../infra/processing/postgres_processing_job_repository.js";
 import { validateReportPayload } from "../../infra/processing/report_schema_validator.js";
 import { createS3StorageService } from "../../infra/storage/s3_client.js";
-
-const DEFAULT_WORKER_LLM_TIMEOUT_MS = 60_000;
 const OPENAI_LOG_LEVELS = new Set(["debug", "info", "warn", "error", "off"]);
 type OpenAiLogLevel = "debug" | "info" | "warn" | "error" | "off";
 
 async function main(): Promise<void> {
   const concurrency = parsePositiveIntegerEnv("WORKER_CONCURRENCY", 2);
   const pollMs = parsePositiveIntegerEnv("WORKER_POLL_MS", 1_000);
-  const llmTimeoutMs = parsePositiveIntegerEnv("WORKER_LLM_TIMEOUT_MS", DEFAULT_WORKER_LLM_TIMEOUT_MS);
   const openAiLogLevel = parseOptionalOpenAiLogLevelEnv("WORKER_OPENAI_LOG_LEVEL");
   const workerId = process.env.WORKER_ID?.trim() || `${os.hostname()}:${process.pid}`;
 
@@ -33,7 +30,6 @@ async function main(): Promise<void> {
     storage,
     llmAdapter,
     validateReportPayload,
-    llmTimeoutMs,
     logEvent: logJsonEvent,
   });
 

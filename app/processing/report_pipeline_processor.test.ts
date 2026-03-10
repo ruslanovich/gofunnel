@@ -74,6 +74,81 @@ test("pipeline happy path: report written, metadata updated, worker finalizes su
   });
 });
 
+test("pipeline does not inject timeout override when llmTimeoutMs is omitted", async () => {
+  const analyzeCalls: Array<Parameters<LlmAdapter["analyzeTranscript"]>[0]> = [];
+  const workerRepository = new FakeWorkerRepository();
+  const pipelineRepository = new FakePipelineRepository({
+    fileContext: FILE_CONTEXT,
+  });
+  const storage = new FakeStorage({
+    getObjectText: async () => "call transcript",
+  });
+  const llmAdapter = createFakeLlmAdapter({
+    analyzeTranscript: async (input) => {
+      analyzeCalls.push(input);
+      return {
+        provider: "fake",
+        model: "test-model",
+        promptVersion: "v1",
+        schemaVersion: "v1",
+        rawText: JSON.stringify(validReportPayload()),
+        parsedJson: validReportPayload(),
+      };
+    },
+  });
+
+  const processor = createReportPipelineProcessor({
+    fileRepository: pipelineRepository,
+    storage,
+    llmAdapter,
+    validateReportPayload,
+  });
+  const worker = createWorker(workerRepository, processor);
+
+  await worker.processClaimedJob(CLAIMED_JOB);
+
+  assert.equal(analyzeCalls.length, 1);
+  assert.equal(analyzeCalls[0]?.timeoutMs, undefined);
+});
+
+test("pipeline forwards explicit llmTimeoutMs override when provided", async () => {
+  const analyzeCalls: Array<Parameters<LlmAdapter["analyzeTranscript"]>[0]> = [];
+  const workerRepository = new FakeWorkerRepository();
+  const pipelineRepository = new FakePipelineRepository({
+    fileContext: FILE_CONTEXT,
+  });
+  const storage = new FakeStorage({
+    getObjectText: async () => "call transcript",
+  });
+  const llmAdapter = createFakeLlmAdapter({
+    analyzeTranscript: async (input) => {
+      analyzeCalls.push(input);
+      return {
+        provider: "fake",
+        model: "test-model",
+        promptVersion: "v1",
+        schemaVersion: "v1",
+        rawText: JSON.stringify(validReportPayload()),
+        parsedJson: validReportPayload(),
+      };
+    },
+  });
+
+  const processor = createReportPipelineProcessor({
+    fileRepository: pipelineRepository,
+    storage,
+    llmAdapter,
+    validateReportPayload,
+    llmTimeoutMs: 90_000,
+  });
+  const worker = createWorker(workerRepository, processor);
+
+  await worker.processClaimedJob(CLAIMED_JOB);
+
+  assert.equal(analyzeCalls.length, 1);
+  assert.equal(analyzeCalls[0]?.timeoutMs, 90_000);
+});
+
 test("schema invalid: raw output is persisted and file is finalized failed with schema_validation_failed", async () => {
   const workerRepository = new FakeWorkerRepository();
   const pipelineRepository = new FakePipelineRepository({

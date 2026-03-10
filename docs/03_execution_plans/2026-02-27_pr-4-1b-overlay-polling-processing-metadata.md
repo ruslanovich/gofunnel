@@ -5,7 +5,7 @@
 - Улучшить UX overlay в `/app` для несостоявшегося yet report:
   - авто-polling статуса после открытия файла;
   - отображение диагностики обработки (`attempt`, `last_error`, `next_run_at`) прямо в overlay.
-- Применить оперативный фикс локального окружения: увеличить `WORKER_LLM_TIMEOUT_MS` и перезапустить worker.
+- Применить оперативный фикс локального окружения: увеличить `LLM_TIMEOUT_MS` и перезапустить worker.
 
 ## Non-goals
 
@@ -47,7 +47,7 @@
    - Scope: обновить unit/integration tests for API payload and dashboard script polling.
 
 4. Ops step
-   - Scope: set `WORKER_LLM_TIMEOUT_MS=180000` in local env + restart worker process.
+   - Scope: set `LLM_TIMEOUT_MS=180000` in local env + restart worker process.
 
 ## Test plan
 

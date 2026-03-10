@@ -162,7 +162,7 @@
     - `fake` when `NODE_ENV == test` and provider is unset
   - `LLM_MODEL` default: `gpt-5-mini`
   - required for real provider: `LLM_API_KEY`
-  - optional timeout override: `LLM_TIMEOUT_MS`
+  - single timeout env for worker-driven LLM calls: `LLM_TIMEOUT_MS` (default `180000`)
   - production guardrails:
     - `LLM_PROVIDER=fake` is rejected
     - missing `LLM_API_KEY` is rejected

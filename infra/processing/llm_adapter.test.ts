@@ -45,8 +45,31 @@ test("analyzeTranscript returns rawText and parsedJson using default prompt/sche
   assert.equal(calls[0]?.promptVersion, "v2");
   assert.equal(calls[0]?.schemaVersion, "v2");
   assert.match(calls[0]?.promptText ?? "", /Structured Output JSON schema/i);
+  assert.equal(calls[0]?.timeoutMs, 180_000);
   assert.equal(result.rawText, JSON.stringify({ overview: "ok" }));
   assert.deepEqual(result.parsedJson, { overview: "ok" });
+});
+
+test("config uses unified default timeout when LLM_TIMEOUT_MS is absent", () => {
+  const config = loadLlmProviderConfig({
+    NODE_ENV: "test",
+  });
+
+  assert.equal(config.timeoutMs, 180_000);
+});
+
+test("config respects LLM_TIMEOUT_MS overrides", () => {
+  const defaultLikeOverride = loadLlmProviderConfig({
+    NODE_ENV: "test",
+    LLM_TIMEOUT_MS: "180000",
+  });
+  const customOverride = loadLlmProviderConfig({
+    NODE_ENV: "test",
+    LLM_TIMEOUT_MS: "90000",
+  });
+
+  assert.equal(defaultLikeOverride.timeoutMs, 180_000);
+  assert.equal(customOverride.timeoutMs, 90_000);
 });
 
 test("retriable provider error is normalized as retriable adapter error", async () => {

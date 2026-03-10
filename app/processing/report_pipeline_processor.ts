@@ -1,8 +1,6 @@
 import { ACTIVE_REPORT_PROMPT_VERSION, ACTIVE_REPORT_SCHEMA_VERSION } from "./report_contract.js";
 import { ProcessingJobError, type ProcessingJobProcessor, type QueuedProcessingJob } from "./worker.js";
 
-const DEFAULT_WORKER_LLM_TIMEOUT_MS = 60_000;
-
 export type ProcessingPipelineFileContext = {
   fileId: string;
   userId: string;
@@ -84,13 +82,17 @@ export type ReportPipelineProcessorDeps = {
 export function createReportPipelineProcessor(deps: ReportPipelineProcessorDeps): ProcessingJobProcessor {
   return new ReportPipelineProcessor({
     ...deps,
-    llmTimeoutMs: normalizeTimeoutMs(deps.llmTimeoutMs),
+    llmTimeoutMs: normalizeOptionalTimeoutMs(deps.llmTimeoutMs),
     logEvent: deps.logEvent ?? (() => undefined),
   });
 }
 
 class ReportPipelineProcessor implements ProcessingJobProcessor {
-  constructor(private readonly deps: Required<ReportPipelineProcessorDeps>) {}
+  constructor(
+    private readonly deps: ReportPipelineProcessorDeps & {
+      logEvent: NonNullable<ReportPipelineProcessorDeps["logEvent"]>;
+    },
+  ) {}
 
   async process(job: QueuedProcessingJob): Promise<void> {
     const fileContext = await this.deps.fileRepository.getFileContext({
@@ -272,9 +274,9 @@ export function buildRawOutputStorageKey(userId: string, fileId: string): string
   return `users/${userId}/files/${fileId}/raw_llm_output.json`;
 }
 
-function normalizeTimeoutMs(value: number | undefined): number {
+function normalizeOptionalTimeoutMs(value: number | undefined): number | undefined {
   if (value === undefined) {
-    return DEFAULT_WORKER_LLM_TIMEOUT_MS;
+    return undefined;
   }
   if (!Number.isInteger(value) || value < 1) {
     throw new Error("llmTimeoutMs must be a positive integer");

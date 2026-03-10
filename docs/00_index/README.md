@@ -74,6 +74,10 @@
 - Epic 4 smoke matrix runbook: `docs/04_runbooks/2026-03-02_epic-4-ui-smoke-matrix.md`
 - ADR-0012 Epic 4 UI refresh integration strategy: `docs/05_decisions/2026-03-02_adr-0012_epic-4-ui-refresh-v0-integration.md`
 
+## Recent planning artifacts (2026-03-10)
+
+- Epic 3 PR-3.2a execution plan (unify LLM timeout source of truth): `docs/03_execution_plans/2026-03-10_pr-3-2a-unify-llm-timeout.md`
+
 ## Важные корневые документы
 
 - Agent map: `AGENTS.md`

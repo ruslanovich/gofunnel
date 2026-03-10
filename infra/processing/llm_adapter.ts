@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 import { resolveReportContractVersions } from "../../app/processing/report_contract.js";
 
-const DEFAULT_LLM_TIMEOUT_MS = 20_000;
+const DEFAULT_LLM_TIMEOUT_MS = 180_000;
 const DEFAULT_LLM_PROVIDER = "openai";
 const DEFAULT_TEST_LLM_PROVIDER = "fake";
 const DEFAULT_LLM_MODEL = "gpt-5-mini";
